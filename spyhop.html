@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>spyhop · a living ocean</title>
+<style>
+  :root { --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #05070f; }
+  #pond { position: fixed; inset: 0; display: block; }
+  .hud { position: fixed; inset: 0; pointer-events: none; z-index: 3; font-family: var(--mono); }
+  .title { position: absolute; left: 22px; top: 18px; }
+  .title h1 { margin: 0; font-size: 16px; font-weight: 500; letter-spacing: .3em; color: #bfe0e4; text-shadow: 0 0 18px rgba(90,190,190,.4); }
+  .title p { margin: 6px 1px 0; font-size: 11px; letter-spacing: .05em; color: #5a7580; display: flex; align-items: center; gap: 7px; }
+  .live { width: 7px; height: 7px; border-radius: 50%; background: #46d69a; box-shadow: 0 0 8px #46d69a; transition: background .3s, box-shadow .3s; }
+  .live.stale { background: #d6a24a; box-shadow: 0 0 8px #d6a24a; }
+  .live.down { background: #d65a5a; box-shadow: 0 0 8px #d65a5a; }
+  .legend { position: absolute; left: 22px; bottom: 16px; font-size: 10.5px; letter-spacing: .04em; color: #567079; line-height: 1.9; }
+  .legend b { color: #8fb8bd; font-weight: 500; }
+  .stats { position: absolute; right: 22px; top: 18px; text-align: right; font-size: 10.5px; letter-spacing: .05em; color: #5a7580; line-height: 1.85; }
+  .stats b { color: #9fc6c0; font-weight: 500; }
+  .toggle { position: absolute; right: 22px; bottom: 16px; pointer-events: auto; }
+  .toggle button { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: #6a848c; background: rgba(14,26,32,.5); border: 1px solid rgba(110,160,165,.18); padding: 7px 12px; border-radius: 999px; cursor: pointer; backdrop-filter: blur(6px); }
+  .toggle button:hover { color: #bfe0e4; border-color: rgba(120,220,210,.4); }
+</style>
+</head>
+<body>
+<canvas id="pond"></canvas>
+<div class="hud">
+  <div class="title"><h1 id="host">spyhop</h1><p><span class="live" id="live"></span><span id="conn">connecting…</span></p></div>
+  <div class="stats" id="stats"></div>
+  <div class="legend">
+    <div><b>sky</b> = 5-min load — clouds, wind &amp; waves build with it</div>
+    <div><b>lightning</b> = swap &gt; 90% &nbsp;·&nbsp; <b>rain</b> = active alert</div>
+    <div><b>creatures</b> = processes · size = memory · speed = cpu</div>
+  </div>
+  <div class="toggle"><button id="lbl">labels: on</button></div>
+</div>
+
+<script>
+"use strict";
+(() => {
+  /* ======================= tunables ======================= */
+  const CFG = {
+    pollMs: 4000, keepAliveMs: 60000,
+    arriveSec: 1.5, leaveSec: 5.1,                             // swim-away is slow (~3x the arrival)
+    far: { scale: 0.12, turn: 0.18, yscale: 0.28, alpha: 0.12 },// receding also flattens on Y
+    ease: { r: 0.06, cpu: 0.05, storm: 0.12, avoidDecay: 0.86, temp: 0.05 },
+    speed: { floor: 8, ceil: 95, cpuRef: 90 },
+    edge: { zone: 90, boost: 2.4 },                            // speed up near the screen edges so nobody loiters
+    wiggle: { base: 4, cpu: 7 },
+    bob: { fish: 16, school: 14, cpuBoost: 0.7, jellyDrift: 40 },
+    radius: { base: 6, memK: 0.85, max: 58, schoolFish: 0.9 },
+    avoid: { gap: 0.72, push: 90, yBias: 1.0, slide: 1.8 },    // slide: strong tangential unstick so head-on pairs pass
+    crab: { near: 1.7, boost: 2.8, decay: 0.9, crawl: 1 },     // near crabs: the larger scoots away; crawl: steady min speed
+    label: { push: 0.45, crabPush: 1.0, charW: 6.4, decay: 0.82 },
+    tempWindowMs: 15000,                                       // mean cpu-temp window for the thermal glow
+    waterLevelF: 0.30, bedFrac: 0.90, wxMax: 1.6,
+    weather: {
+      floor: 0.18,                                              // load/core below this reads as calm
+      cloudBase: 3, cloudGain: 12, poolMax: 22, fade: 0.03,
+      sizeBase: 1.0, sizeGain: 1.2,
+      windBase: 4, windGain: 95,
+      waveBase: 1.2, waveGain: 16,
+      whitecapWi: 0.45,
+    },
+    swap: { boltFloor: 90 },                                    // lightning begins above this swap %
+    disk: { knee: 80, base: 2, max: 26, exp: 1.8 },             // seabed rocks; superlinear past the knee
+    temp: { lo: 50, hi: 92, dayLo: 66, dayHi: 90 },             // lo/hi: thermal underglow; dayLo/dayHi: sun horizon->zenith
+    sun: { tau: 1.8 },                                          // smoothing time-constant for the sun's rise/fall (gentler = larger)
+    moon: { xF: 0.82, yF: 0.12, rF: 0.05 }, storm: { xF: 0.76, yF: 0.10 },
+  };
+  const PAL = {
+    skyTop: '#070a1a', skyMid: '#0b1428', skyLow: '#132a38',
+    waterTop: '#123244', waterMid: '#0c2534', waterLow: '#061620',
+    bedFill: '#08252a', bedLow: '#05171b',
+    moonCore: '#e7efe6', moonCrater: 'rgba(120,140,140,0.18)', moonGlow: a => `rgba(180,205,200,${a})`,
+    cloud: a => `rgba(64,74,104,${a})`,
+    storm: a => `rgba(74,52,104,${a})`, stormIn: a => `rgba(110,80,150,${a})`,
+    stormCrit: a => `rgba(96,42,78,${a})`, stormCritIn: a => `rgba(132,60,100,${a})`,
+    rain: a => `rgba(205,196,240,${a})`, flash: a => `rgba(215,198,245,${a})`,
+    lightning: a => `rgba(226,232,255,${a})`, bolt: a => `rgba(246,249,255,${a})`,
+    wind: a => `rgba(190,205,225,${a})`, star: a => `rgba(200,220,225,${a})`,
+    god: a => `rgba(120,200,200,${a})`, plankton: a => `rgba(140,210,200,${a})`, thermal: a => `rgba(255,110,45,${a})`,
+    bubble: a => `rgba(160,225,220,${a})`, surface: a => `rgba(150,220,220,${a})`, whitecap: a => `rgba(190,235,235,${a})`,
+    alertWarn: a => `rgba(200,182,236,${a})`, alertCrit: a => `rgba(242,152,152,${a})`,
+    label: h => h ? 'rgba(210,240,238,0.95)' : 'rgba(150,195,195,0.42)',
+    eyeWhite: 'rgba(255,255,255,0.9)', eyeDark: '#04141a',
+  };
+  // Creature rules come from the server at /config.json (user pins + built-in
+  // defaults, one source of truth). They're compiled into KINDS on boot; until
+  // then KINDS is empty and kindOf() falls back to a per-name colour hash, so
+  // the scene renders regardless.
+  let KINDS = [];
+  const SHAPES = new Set(['angler', 'whale', 'jelly', 'squid', 'ray', 'fish', 'school', 'crab']);
+  const hashHue = s => { let h = 0; for (const ch of s) h = (h * 31 + ch.charCodeAt(0)) % 360; return h; };
+  function specToKind(c) {
+    const h = hashHue((c.match || '').toLowerCase());
+    return {
+      re: new RegExp(c.match, 'i'),                       // throws on bad pattern -> entry dropped
+      shape: SHAPES.has(c.shape) ? c.shape : 'fish',
+      hue: c.hue ?? (h + 180) % 360,
+      sat: c.sat ?? 50, lit: c.lit ?? 58,
+      spd: c.spd ?? (0.5 + (h % 30) / 60),
+      band: Array.isArray(c.band) ? c.band : [.40, .78],
+      mul: c.mul, always: c.always,
+    };
+  }
+  async function loadKinds() {
+    try {
+      const r = await fetch('/config.json', { cache: 'no-store' });
+      if (!r.ok) throw 0;
+      const { creatures } = await r.json();
+      KINDS = (creatures || []).map(c => { try { return specToKind(c); } catch { return null; } }).filter(Boolean);
+    } catch (e) { /* leave KINDS empty -> hash-coloured fallback below */ }
+  }
+  function kindOf(name) {
+    const s = name.toLowerCase();
+    for (const k of KINDS) if (k.re.test(s)) return k;
+    const h = hashHue(s);
+    return { shape: 'fish', hue: (h + 180) % 360, sat: 42, lit: 58, spd: 0.5 + (h % 30) / 60, band: [.40, .78] };
+  }
+
+  /* ======================= helpers ======================= */
+  const TAU = Math.PI * 2;
+  const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const easeOut = t => 1 - Math.pow(1 - t, 3);
+  const rand = Math.random;
+  const col = (k, dl, a) => `hsla(${k.hue},${k.sat}%,${clamp(k.lit + dl, 0, 100)}%,${a})`;
+  const mixRGB = (a, b, t) => `${Math.round(lerp(a[0], b[0], t))},${Math.round(lerp(a[1], b[1], t))},${Math.round(lerp(a[2], b[2], t))}`;
+  const mix = (a, b, t) => `rgb(${mixRGB(a, b, t)})`;
+  const SKY_N = [[7, 10, 26], [11, 20, 40], [19, 42, 56]];       // night sky gradient stops
+  const SKY_D = [[74, 128, 186], [120, 170, 214], [176, 208, 232]]; // day (blue) sky
+  const CLOUD_N = [64, 74, 104], CLOUD_D = [206, 214, 226];     // cloud tint: night grey-blue -> day white
+  const WATER_N = [[18, 50, 68], [12, 37, 52], [6, 22, 32]];    // water gradient: night deep -> sunlit teal
+  const WATER_D = [[86, 168, 190], [46, 120, 150], [22, 78, 104]];
+  const CLOUD_PUFFS = [[0, 0, 1], [.6, .1, .8], [-.6, .12, .75], [.25, -.2, .7], [-.25, -.15, .65]];
+
+  const cv = document.getElementById('pond'), ctx = cv.getContext('2d');
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const M = reduce ? 0.2 : 1;
+  let W, H, DPR, waterY, bedY;
+  let showLabels = true, firstLoad = true;
+  const mouse = { x: -999, y: -999 };
+
+  function ellipse(x, y, rx, ry) { ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, TAU); ctx.fill(); }
+  function tri(ax, ay, bx, by, cx, cy) { ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.lineTo(cx, cy); ctx.closePath(); ctx.fill(); }
+  function dot(x, y, r, fill) { ctx.fillStyle = fill; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); }
+  function glow(r, k) { const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r); g.addColorStop(0, col(k, 12, .95)); g.addColorStop(.55, col(k, 0, .5)); g.addColorStop(1, col(k, -8, 0)); return g; }
+  const radius = (mib, mul) => Math.min(CFG.radius.max, (CFG.radius.base + Math.sqrt(Math.max(1, mib)) * CFG.radius.memK) * (mul || 1));
+  const schoolOffs = n => Array.from({ length: n }, () => ({ dx: (rand() - .5) * 60, dy: (rand() - .5) * 40, ph: rand() * TAU }));
+
+  /* ======================= live state ======================= */
+  const S = { cpu: 0, load: 0, load5: 0, cores: 4, memPct: 0, swapPct: 0, temp: 0, tempMean: 0, disk: 0, alarms: 0, alerts: [], containers: 0, uptime: '—' };
+  const env = { wi: 0, cloudCount: CFG.weather.cloudBase, cloudSize: CFG.weather.sizeBase, wind: CFG.weather.windBase, waveAmp: CFG.weather.waveBase, stormA: 0, stormAT: 0, rockCount: CFG.disk.base, tempDisp: 0, sunH: 0, sunH1: 0 };
+  let lightning = 0, bolt = null, tempHist = [], lastUpdate = 0, connState = 'connecting';
+
+  /* ======================= creatures ======================= */
+  const creatures = new Map();
+  function makeCreature(item, present) {
+    const k = kindOf(item.n), [a, b] = k.band;
+    const per = k.shape === 'school' ? item.m / Math.max(1, item.c) : item.m;
+    const members = k.shape === 'school' ? clamp(item.c | 0, 2, 8) : 1;
+    const c = {
+      name: item.n, mem: item.m, count: item.c, k, frac: a + rand() * (b - a),
+      r: 0, rT: radius(per, k.mul), cpu: 0, cpuT: item.cpu || 0, person: .85 + rand() * .3,
+      dir: rand() < .5 ? -1 : 1, t: rand() * 100, bob: rand() * TAU,
+      x: rand() * innerWidth, swimY: 0, avoidY: 0, rDraw: 0, turn: 1, turnY: 1, alpha: 1, act: 0, wig: 0, boost: 0,
+      labelOff: { x: 0, y: 0 }, labelHW: 0,
+      arrive: present ? 1 : 0, state: present ? 'in' : 'entering', lastSeen: Date.now(),
+      off: schoolOffs(members),
+    };
+    if (present) c.r = c.rT;
+    return c;
+  }
+  function reconcile(list) {
+    for (const item of list) {
+      let c = creatures.get(item.n);
+      if (c) {
+        c.mem = item.m; c.count = item.c; c.cpuT = item.cpu || 0; c.lastSeen = Date.now();
+        c.rT = radius(c.k.shape === 'school' ? item.m / Math.max(1, item.c) : item.m, c.k.mul);
+        if (c.state === 'leaving') c.state = 'entering';
+        if (c.k.shape === 'school') { const w = clamp(item.c | 0, 2, 8); while (c.off.length < w) c.off.push(schoolOffs(1)[0]); c.off.length = Math.min(c.off.length, w); }
+      } else creatures.set(item.n, makeCreature(item, firstLoad));
+    }
+    firstLoad = false;
+  }
+
+  /* ======================= creature drawing ======================= */
+  function begin(c, x, y) { ctx.save(); ctx.globalAlpha = c.alpha; ctx.translate(x, y); ctx.scale(c.dir * c.turn, c.turnY); }
+  function eyes(r) { ctx.globalCompositeOperation = 'source-over'; dot(r * .5, -r * .12, r * .11 + .6, PAL.eyeWhite); dot(r * .53, -r * .12, r * .055 + .3, PAL.eyeDark); }
+
+  function drawFish(c, x, y, r) {
+    begin(c, x, y); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = glow(r * 1.5, c.k);
+    ctx.save(); ctx.rotate(Math.sin(c.wig) * .25); tri(-r * .8, 0, -r * 1.5, -r * .5, -r * 1.5, r * .5); ctx.restore();
+    ellipse(0, 0, r, r * .6); eyes(r); ctx.restore();
+  }
+  function drawWhale(c, x, y, r) {
+    begin(c, x, y); const g = ctx.createLinearGradient(0, -r * .6, 0, r * .6); g.addColorStop(0, col(c.k, 6, .95)); g.addColorStop(1, col(c.k, -18, .95)); ctx.fillStyle = g;
+    ctx.save(); ctx.rotate(Math.sin(c.wig) * .12); ctx.beginPath(); ctx.moveTo(-r * .9, 0); ctx.quadraticCurveTo(-r * 1.5, -r * .6, -r * 1.7, -r * .1); ctx.quadraticCurveTo(-r * 1.5, r * .05, -r * .9, 0); ctx.fill(); ctx.restore();
+    ellipse(0, 0, r, r * .52); ctx.fillStyle = col(c.k, 18, .35); ellipse(r * .1, r * .18, r * .85, r * .28);
+    dot(r * .55, -r * .14, r * .06 + 1, PAL.eyeWhite); ctx.restore();
+  }
+  function drawJelly(c, x, y, r, t) {
+    ctx.save(); ctx.globalAlpha = c.alpha; ctx.translate(x, y); ctx.scale(c.turn, c.turnY); ctx.globalCompositeOperation = 'lighter';
+    const p = 1 + Math.sin(t * 1.6 + c.bob) * .12 * M; ctx.fillStyle = glow(r * 1.6, c.k);
+    ctx.beginPath(); ctx.ellipse(0, 0, r * p, r * .8 * p, 0, Math.PI, 0); ctx.fill();
+    ctx.strokeStyle = col(c.k, 6, .5); ctx.lineWidth = 1.6; ctx.lineCap = 'round';
+    for (let i = 0; i < 6; i++) { const tx = (i - 2.5) * r * .3; ctx.beginPath(); ctx.moveTo(tx, 0); for (let s = 1; s <= 6; s++) { const f = s / 6; ctx.lineTo(tx + Math.sin(t * 2 * M + i + f * 3) * 5 * f, r * .7 + f * r * 1.5); } ctx.stroke(); }
+    ctx.restore();
+  }
+  function drawSquid(c, x, y, r) {
+    begin(c, x, y); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = glow(r * 1.6, c.k);
+    ellipse(r * .15, 0, r * .95, r * .48); tri(r * 1.05, 0, r * .55, -r * .55, r * .55, r * .55);
+    ctx.strokeStyle = col(c.k, 6, .55); ctx.lineWidth = 1.6; ctx.lineCap = 'round';
+    for (let i = 0; i < 6; i++) { const dy = (i - 2.5) * r * .16; ctx.beginPath(); ctx.moveTo(-r * .7, dy); for (let s = 1; s <= 5; s++) { const f = s / 5; ctx.lineTo(-r * .7 - f * r * 1.3, dy + Math.sin(c.wig + i + f * 3) * 4 * f); } ctx.stroke(); }
+    ctx.globalCompositeOperation = 'source-over'; dot(r * .25, -r * .16, r * .1, PAL.eyeWhite); dot(r * .27, -r * .16, r * .05, PAL.eyeDark); ctx.restore();
+  }
+  function drawRay(c, x, y, r) {
+    begin(c, x, y); ctx.globalCompositeOperation = 'lighter'; const flap = Math.sin(c.wig) * .5; ctx.fillStyle = glow(r * 1.5, c.k);
+    ctx.beginPath(); ctx.moveTo(r * 1.1, 0); ctx.quadraticCurveTo(0, -r * (1 + flap), -r * .9, -r * .15); ctx.quadraticCurveTo(-r * .4, 0, -r * .9, r * .15); ctx.quadraticCurveTo(0, r * (1 + flap), r * 1.1, 0); ctx.fill();
+    ctx.strokeStyle = col(c.k, 0, .45); ctx.lineWidth = 1.4; ctx.beginPath(); ctx.moveTo(-r * .85, 0); ctx.lineTo(-r * 1.9, Math.sin(c.wig) * r * .3); ctx.stroke();
+    ctx.globalCompositeOperation = 'source-over'; dot(r * .55, -r * .12, r * .07, PAL.eyeWhite); dot(r * .55, r * .12, r * .07, PAL.eyeWhite); ctx.restore();
+  }
+  function drawAngler(c, x, y, r, t) {
+    begin(c, x, y); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = glow(r * 1.5, c.k);
+    ctx.save(); ctx.rotate(Math.sin(c.wig) * .2); tri(-r * .7, 0, -r * 1.35, -r * .55, -r * 1.35, r * .55); ctx.restore();
+    ellipse(-r * .1, 0, r, r * .78);                                   // round deep-sea body
+    ctx.globalCompositeOperation = 'source-over'; ctx.fillStyle = col(c.k, -34, .92);
+    ctx.beginPath(); ctx.moveTo(r * .45, -r * .12); ctx.lineTo(r * 1.05, -r * .05); ctx.lineTo(r * 1.05, r * .34); ctx.lineTo(r * .4, r * .42); ctx.closePath(); ctx.fill();   // gaping jaw
+    ctx.strokeStyle = 'rgba(230,240,240,0.8)'; ctx.lineWidth = 1;
+    for (let i = 0; i < 4; i++) { const tx = r * (.55 + i * .13); ctx.beginPath(); ctx.moveTo(tx, r * .02); ctx.lineTo(tx + r * .04, r * .17); ctx.stroke(); }
+    dot(r * .1, -r * .28, r * .13, PAL.eyeWhite); dot(r * .13, -r * .28, r * .06, PAL.eyeDark);
+    const bx = r * 1.2 + Math.sin(t * 1.5 + c.bob) * r * .12, by = -r * .72 + Math.cos(t * 1.2) * r * .08;   // the lure
+    ctx.strokeStyle = col(c.k, 0, .6); ctx.lineWidth = 1.4; ctx.beginPath(); ctx.moveTo(r * .1, -r * .55); ctx.quadraticCurveTo(r * .7, -r * 1.1, bx, by); ctx.stroke();
+    ctx.globalCompositeOperation = 'lighter'; const pulse = .7 + .3 * Math.sin(t * 3 + c.bob);
+    const lg = ctx.createRadialGradient(bx, by, 0, bx, by, r * .6 * pulse);
+    lg.addColorStop(0, 'hsla(48,100%,86%,0.95)'); lg.addColorStop(.4, col(c.k, 20, .7)); lg.addColorStop(1, col(c.k, 0, 0));
+    ctx.fillStyle = lg; ctx.beginPath(); ctx.arc(bx, by, r * .6 * pulse, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+  function drawCrab(c, x, y, r) {
+    begin(c, x, y); ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = col(c.k, -12, .85); ctx.lineWidth = 2; ctx.lineCap = 'round';
+    for (const sgn of [-1, 1]) for (let i = 0; i < 3; i++) { const lx = (i - 1) * r * .5, sw = Math.sin(c.wig + i + (sgn > 0 ? 0 : 1.6)) * r * .12; ctx.beginPath(); ctx.moveTo(lx, 0); ctx.lineTo(lx + sgn * r * .5, r * .5 + sw); ctx.stroke(); }
+    ctx.strokeStyle = col(c.k, -4, .9);
+    for (const sgn of [-1, 1]) { ctx.beginPath(); ctx.moveTo(sgn * r * .7, -r * .1); ctx.lineTo(sgn * r * 1.2, -r * .5 + Math.sin(c.wig) * r * .08); ctx.stroke(); }
+    ctx.fillStyle = glow(r * 1.2, c.k); ellipse(0, 0, r, r * .7);
+    ctx.globalCompositeOperation = 'source-over';
+    for (const sgn of [-1, 1]) { ctx.strokeStyle = col(c.k, -8, .8); ctx.beginPath(); ctx.moveTo(sgn * r * .25, -r * .45); ctx.lineTo(sgn * r * .3, -r * .8); ctx.stroke(); dot(sgn * r * .3, -r * .8, r * .1, PAL.eyeWhite); dot(sgn * r * .3, -r * .8, r * .05, PAL.eyeDark); }
+    ctx.restore();
+  }
+  function label(text, x, y, hov) {
+    ctx.globalAlpha = 1; ctx.font = `${hov ? 12 : 10.5}px ui-monospace, monospace`; ctx.textAlign = 'center';
+    ctx.fillStyle = PAL.label(hov); ctx.fillText(text, x, y); ctx.textAlign = 'left';
+  }
+
+  /* ======================= environment ======================= */
+  const stars = Array.from({ length: 90 }, () => ({ x: rand(), y: rand() * .34, r: rand() * 1.2 + .2, ph: rand() * TAU }));
+  const clouds = Array.from({ length: CFG.weather.poolMax }, () => ({ x: rand(), y: .04 + rand() * .17, s: .7 + rand() * .7, v: .4 + rand() * .7, a: 0 }));
+  const backClouds = Array.from({ length: 6 }, () => ({ x: rand(), y: .05 + rand() * .16, s: 2.4 + rand() * 1.9, v: .2 + rand() * .3 }));   // overcast layer
+  const streaks = Array.from({ length: 20 }, () => ({ hx: rand() * innerWidth, hy: (.05 + rand() * .22) * innerHeight, th: (rand() - .5) * .5, w1: .5 + rand() * 1.0, w2: 1.0 + rand() * 1.5, a1: .7 + rand() * .7, a2: .4 + rand() * .5, ph: rand() * TAU, ph2: rand() * TAU, phase: rand() * 100, sp: .7 + rand() * .6, trail: [] }));
+  const storm = { flash: 0, drops: Array.from({ length: 26 }, () => ({ x: rand(), y: rand(), sp: rand() * .5 + .5 })) };
+  const bubbles = [], plankton = Array.from({ length: 40 }, () => ({ x: rand(), y: rand(), ph: rand() * TAU, sp: rand() * .3 + .1 }));
+  const weed = Array.from({ length: 34 }, (_, i) => ({ x: (i + .5) / 34 + (rand() - .5) * .02, h: .05 + rand() * .11, ph: rand() * TAU, hue: 150 + rand() * 50 }));
+  const rocks = Array.from({ length: 28 }, () => ({ x: rand(), s: 9 + rand() * 30, o: (rand() - .5) * 6, tone: 16 + rand() * 10 }));
+  const waveY = (x, t) => Math.sin(x * .02 + t * 1.4 * M) * env.waveAmp + Math.sin(x * .05 - t * M) * env.waveAmp * .4;
+  const surfAt = (x, t) => waterY + waveY(x, t);
+
+  function makeBolt() { const n = 9, pts = []; let cx = W * (.2 + rand() * .6); for (let i = 0; i <= n; i++) { pts.push(cx, waterY * i / n); cx += (rand() - .5) * 46; } return pts; }
+  function drawRock(x, y, s, tone) { ctx.fillStyle = `hsl(195,10%,${tone}%)`; ellipse(x, y - s * .35, s, s * .58); ctx.fillStyle = 'rgba(150,175,175,0.13)'; ellipse(x - s * .3, y - s * .55, s * .4, s * .2); }
+
+  // wind = ribbons that trail their head. Each head drifts right (wind) while wobbling
+  // vertically (load-scaled); the body is the head's recent path, fading toward the tail.
+  function drawStreaks(dt, t) {
+    const swx = clamp(env.wi * .5, 0, .5);
+    if (swx <= .015) { for (const s of streaks) s.trail.length = 0; return; }
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    const turb = 1.1 + env.wi * 5.5, spd = (24 + env.wind * .8) * M;   // turning strength & speed grow with load
+    for (const s of streaks) {
+      s.phase += dt;
+      const omega = turb * (Math.sin(s.phase * s.w1 + s.ph) * s.a1 + Math.sin(s.phase * s.w2 - s.ph2) * s.a2) - 0.9 * Math.sin(s.th);
+      s.th += omega * dt;                                              // integrate heading -> curls, and loops at high load
+      s.hx += Math.cos(s.th) * spd * s.sp * dt; s.hy += Math.sin(s.th) * spd * s.sp * dt;
+      s.hy = clamp(s.hy, H * .015, waterY - 8);
+      if (s.hx > W + 40 || s.hx < -90) { s.hx = -30; s.hy = (.05 + rand() * .22) * H; s.th = (rand() - .5) * .5; s.trail.length = 0; }
+      s.trail.push(s.hx, s.hy);
+      const maxpts = 44 * 2; if (s.trail.length > maxpts) s.trail.splice(0, s.trail.length - maxpts);
+      const n = s.trail.length / 2;
+      for (let i = 1; i < n; i++) { const f = i / (n - 1 || 1); ctx.strokeStyle = PAL.wind(swx * f); ctx.lineWidth = .5 + f * 1.5; ctx.beginPath(); ctx.moveTo(s.trail[(i - 1) * 2], s.trail[(i - 1) * 2 + 1]); ctx.lineTo(s.trail[i * 2], s.trail[i * 2 + 1]); ctx.stroke(); }
+    }
+  }
+
+  function drawSky(t, dt) {
+    const dfRaw = clamp((env.tempDisp - CFG.temp.dayLo) / (CFG.temp.dayHi - CFG.temp.dayLo), 0, 1);   // heat -> sun height
+    const aSun = 1 - Math.exp(-dt / CFG.sun.tau);                   // two-stage low-pass -> gentle, low-acceleration rise/fall
+    env.sunH1 += (dfRaw - env.sunH1) * aSun; env.sunH += (env.sunH1 - env.sunH) * aSun;
+    const df = env.sunH, r = Math.min(W, H) * CFG.moon.rF;
+    let g = ctx.createLinearGradient(0, 0, 0, waterY);
+    g.addColorStop(0, mix(SKY_N[0], SKY_D[0], df)); g.addColorStop(.6, mix(SKY_N[1], SKY_D[1], df)); g.addColorStop(1, mix(SKY_N[2], SKY_D[2], df));
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, waterY + env.waveAmp * 1.4 + 3);
+    const dawn = df > .02 ? clamp(1 - df * 2, 0, 1) : 0;            // warm horizon wash while the sun is low
+    if (dawn > .01) { g = ctx.createLinearGradient(0, waterY - H * .3, 0, waterY); g.addColorStop(0, 'rgba(255,150,90,0)'); g.addColorStop(1, `rgba(255,138,95,${.5 * dawn})`); ctx.fillStyle = g; ctx.fillRect(0, waterY - H * .3, W, H * .3); }
+    for (const s of stars) dot(s.x * W, s.y * H, s.r, PAL.star(.55 * (.9 + .1 * Math.sin(t * 1.5 + s.ph)) * (1 - df)));   // gentle twinkle (80–100%), fade out by day
+    {                                                               // moon: fixed high-right, stays visible but dim by day
+      const mx = W * CFG.moon.xF, my = H * CFG.moon.yF; ctx.globalAlpha = 1 - df * .78;
+      g = ctx.createRadialGradient(mx, my, 0, mx, my, r * 4); g.addColorStop(0, PAL.moonGlow(.5)); g.addColorStop(.2, PAL.moonGlow(.12)); g.addColorStop(1, PAL.moonGlow(0));
+      ctx.fillStyle = g; ctx.fillRect(mx - r * 4, my - r * 4, r * 8, r * 8);
+      ctx.fillStyle = PAL.moonCore; ellipse(mx, my, r, r); ctx.fillStyle = PAL.moonCrater; ellipse(mx - r * .3, my - r * .2, r * .22, r * .22); ellipse(mx + r * .35, my + r * .3, r * .15, r * .15);
+      ctx.globalAlpha = 1;
+    }
+    if (df > .01) {                                                 // sun: rises from the water on the opposite side, height ∝ temp
+      const sx = W * (1 - CFG.moon.xF), sy = lerp(waterY, H * CFG.moon.yF, df), warm = clamp(1 - df * 1.3, 0, 1);
+      g = ctx.createRadialGradient(sx, sy, 0, sx, sy, r * 6);
+      g.addColorStop(0, `rgba(255,${Math.round(212 - warm * 72)},${Math.round(150 - warm * 96)},0.6)`); g.addColorStop(.28, 'rgba(255,188,88,0.16)'); g.addColorStop(1, 'rgba(255,188,88,0)');
+      ctx.fillStyle = g; ctx.fillRect(sx - r * 6, sy - r * 6, r * 12, r * 12);
+      ctx.fillStyle = `rgb(255,${Math.round(240 - warm * 44)},${Math.round(200 - warm * 92)})`; ellipse(sx, sy, r * 1.1, r * 1.1);
+    }
+    drawStreaks(dt, t);
+    const cloudRGB = mixRGB(CLOUD_N, CLOUD_D, df);
+    const overcast = clamp((env.wi - .5) * 1.3, 0, .55);           // heavy load -> overcast backdrop
+    if (overcast > .01) for (const b of backClouds) { b.x += env.wind * b.v / W * .006 * M; if (b.x > 1.45) b.x = -.45; const cx = b.x * W, cy = b.y * H, s = b.s * (1 + env.wi * .3); ctx.fillStyle = `rgba(${cloudRGB},${overcast * .5})`; for (const [dx, dy, rr] of CLOUD_PUFFS) ellipse(cx + dx * 60 * s, cy + dy * 60 * s, 54 * s * rr, 34 * s * rr); }
+    clouds.forEach((c, i) => {
+      c.a += ((i < env.cloudCount ? 1 : 0) - c.a) * CFG.weather.fade;
+      c.x += env.wind * c.v / W * .012 * M; if (c.x > 1.28) c.x = -.25;
+      if (c.a > .02) { const cx = c.x * W, cy = c.y * H, s = env.cloudSize * c.s; ctx.fillStyle = `rgba(${cloudRGB},${.5 * c.a})`; for (const [dx, dy, rr] of CLOUD_PUFFS) ellipse(cx + dx * 46 * s, cy + dy * 46 * s, 40 * s * rr, 26 * s * rr); }
+    });
+    // swap pressure -> lightning
+    const swi = clamp((S.swapPct - CFG.swap.boltFloor) / (100 - CFG.swap.boltFloor), 0, 1);
+    if (swi > 0 && !reduce && rand() < .003 + swi * .035) { lightning = 1; bolt = makeBolt(); }
+    lightning *= .82;
+    if (lightning > .02) {
+      ctx.fillStyle = PAL.lightning(lightning * (.3 + .55 * swi)); ctx.fillRect(0, 0, W, waterY + env.waveAmp * 1.4);
+      if (bolt) { ctx.strokeStyle = PAL.bolt(lightning); ctx.lineWidth = 2.2; ctx.lineJoin = 'round'; ctx.beginPath(); for (let i = 0; i < bolt.length; i += 2) i ? ctx.lineTo(bolt[i], bolt[i + 1]) : ctx.moveTo(bolt[i], bolt[i + 1]); ctx.stroke(); }
+    }
+    // alerts -> rain cloud
+    if (env.stormA > .02) {
+      const sx = W * CFG.storm.xF, sy = H * CFG.storm.yF, crit = S.alerts.some(a => a.s === 'CRITICAL'), A = env.stormA;
+      storm.flash *= .9; if (!reduce && rand() < .004) storm.flash = 1;
+      const puff = (s, base, inner) => { for (const [dx, dy, rr, cc] of [[0, 0, 1, base], [.6, .1, .8, inner], [-.6, .12, .75, base], [.25, -.2, .7, inner], [-.25, -.15, .65, base]]) { ctx.fillStyle = cc; ellipse(sx + dx * 46 * s, sy + dy * 46 * s, 40 * s * rr, 26 * s * rr); } };
+      puff(1.25, (crit ? PAL.stormCrit : PAL.storm)(.92 * A), (crit ? PAL.stormCritIn : PAL.stormIn)(.6 * A));
+      if (storm.flash > .05) { const fc = PAL.flash(storm.flash * .5 * A); puff(1.25, fc, fc); }   // light up each puff, not one oval
+      ctx.strokeStyle = PAL.rain(.5 * A); ctx.lineWidth = 1.3;
+      for (const d of storm.drops) { d.y += d.sp * .022 * (M || .2); if (d.y > 1) d.y = 0; const dx = sx + (d.x - .5) * 150, dy = sy + 24 + d.y * (waterY - sy - 14); ctx.beginPath(); ctx.moveTo(dx, dy); ctx.lineTo(dx - 1.6, dy + 8); ctx.stroke(); }
+      ctx.textAlign = 'center'; ctx.font = '10.5px ui-monospace, monospace'; ctx.lineJoin = 'round'; ctx.lineWidth = 3.2;
+      const drawAlert = (txt, ty, fill) => { ctx.strokeStyle = `rgba(6,10,20,${.7 * A})`; ctx.strokeText(txt, sx, ty); ctx.fillStyle = fill; ctx.fillText(txt, sx, ty); };   // dark halo -> readable on day or night sky
+      S.alerts.slice(0, 2).forEach((a, i) => { let nm = a.n.replace(/_/g, ' '); if (nm.length > 26) nm = nm.slice(0, 25) + '…'; drawAlert(`${nm} · ${a.s.toLowerCase()} · ${Math.round(a.v)}${a.u || ''}`, sy - 42 - i * 13, (a.s === 'CRITICAL' ? PAL.alertCrit : PAL.alertWarn)(.95 * A)); });
+      if (S.alerts.length > 2) drawAlert(`+${S.alerts.length - 2} more`, sy - 42 - 26, PAL.alertWarn(.7 * A));
+      ctx.textAlign = 'left';
+    }
+  }
+  function drawWater(t) {
+    const surf = new Path2D(); surf.moveTo(0, surfAt(0, t));
+    for (let x = 12; x <= W; x += 12) surf.lineTo(x, surfAt(x, t));
+    surf.lineTo(W, H); surf.lineTo(0, H); surf.closePath();
+    let g = ctx.createLinearGradient(0, waterY, 0, H); g.addColorStop(0, mix(WATER_N[0], WATER_D[0], env.sunH)); g.addColorStop(.5, mix(WATER_N[1], WATER_D[1], env.sunH)); g.addColorStop(1, mix(WATER_N[2], WATER_D[2], env.sunH));   // water lightens toward day
+    ctx.fillStyle = g; ctx.fill(surf);
+    ctx.save(); ctx.clip(surf); ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < 5; i++) { const rx = ((i / 5 + t * .01 * M) % 1) * W; g = ctx.createLinearGradient(rx, waterY, rx + 60, H * .7); g.addColorStop(0, PAL.god(.05)); g.addColorStop(1, PAL.god(0)); ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(rx, waterY); ctx.lineTo(rx + 40, waterY); ctx.lineTo(rx + 120, H * .75); ctx.lineTo(rx + 10, H * .75); ctx.fill(); }
+    for (const pk of plankton) { const px = ((pk.x + t * pk.sp * .006 * M) % 1) * W, py = waterY + pk.y * (H - waterY) + Math.sin(t + pk.ph) * 6 * M; dot(px, py, 1, PAL.plankton(.12 + .1 * Math.sin(t * 2 + pk.ph))); }
+    ctx.restore();
+  }
+  function drawBubbles(dt, t) {
+    if (rand() < .4) { const sm = Math.min(W * .6, env.wind * 2.2); bubbles.push({ x: -sm + rand() * (W + sm), y: H, r: rand() * 3 + 1, ph: rand() * TAU }); }   // some start upwind/offscreen so the drift fills the top
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.strokeStyle = PAL.bubble(.28); ctx.lineWidth = 1;
+    for (let i = bubbles.length - 1; i >= 0; i--) {
+      const b = bubbles[i]; b.y -= (20 + b.r * 6) * dt * M; b.x += (env.wind * .002 + Math.sin(t * 1.5 + b.ph) * .01 * env.waveAmp) * dt * 60 * M;
+      if (b.y < surfAt(b.x, t)) { bubbles.splice(i, 1); continue; }
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  function drawBed(t) {
+    env.tempDisp += ((S.tempMean || S.temp) - env.tempDisp) * CFG.ease.temp;        // eased 15s-mean, no stepping
+    const ti = clamp((env.tempDisp - CFG.temp.lo) / (CFG.temp.hi - CFG.temp.lo), 0, 1) * (1 - env.sunH);   // warm glow: night-only, fades as the sun rises
+    if (ti > .02) { ctx.save(); ctx.globalCompositeOperation = 'lighter'; const tg = ctx.createLinearGradient(0, H, 0, H * .6); tg.addColorStop(0, PAL.thermal(.26 * ti)); tg.addColorStop(1, PAL.thermal(0)); ctx.fillStyle = tg; ctx.fillRect(0, H * .6, W, H * .4); ctx.restore(); }
+    let g = ctx.createLinearGradient(0, bedY - 20, 0, H); g.addColorStop(0, 'rgba(8,26,30,0)'); g.addColorStop(1, PAL.bedLow); ctx.fillStyle = g; ctx.fillRect(0, bedY - 40, W, H - bedY + 40);
+    ctx.fillStyle = PAL.bedFill; ctx.beginPath(); ctx.moveTo(0, H); for (let x = 0; x <= W; x += 24) ctx.lineTo(x, bedY + Math.sin(x * .03) * 8 + 14); ctx.lineTo(W, H); ctx.fill();
+    for (let i = 0; i < env.rockCount && i < rocks.length; i++) { const rk = rocks[i], rx = rk.x * W; drawRock(rx, bedY + Math.sin(rx * .03) * 8 + 12 + rk.o, rk.s, rk.tone); }   // disk usage
+    ctx.lineWidth = 3; ctx.lineCap = 'round';
+    for (const w of weed) { const bx = w.x * W, len = w.h * H; ctx.strokeStyle = `hsla(${w.hue},45%,42%,0.7)`; ctx.beginPath(); ctx.moveTo(bx, bedY + 12); for (let i = 1; i <= 7; i++) { const f = i / 7; ctx.lineTo(bx + Math.sin(t * 1.2 * M + w.ph + f * 2 + env.wind * .003) * 10 * f, bedY + 12 - len * f); } ctx.stroke(); }
+  }
+  function drawSurface(t) {
+    ctx.strokeStyle = PAL.surface(.35); ctx.lineWidth = 1.4; ctx.beginPath();
+    for (let x = 0; x <= W; x += 12) { const y = surfAt(x, t); x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y); } ctx.stroke();
+    if (env.wi > CFG.weather.whitecapWi) {
+      ctx.fillStyle = PAL.whitecap(clamp((env.wi - CFG.weather.whitecapWi) * .5, 0, .3));
+      for (let x = 0; x <= W; x += 46) if (Math.sin(x * .02 + t * 1.4 * M) > .6) { ctx.beginPath(); ctx.ellipse(x, surfAt(x, t), 6, 2, 0, 0, TAU); ctx.fill(); }
+    }
+  }
+
+  /* ======================= loop ======================= */
+  let last = performance.now(), clock = 0;
+  function frame(now) {
+    const dt = Math.min(.05, (now - last) / 1000); last = now; clock += dt;
+    env.stormA += (env.stormAT - env.stormA) * CFG.ease.storm;
+
+    drawSky(clock, dt); drawWater(clock); drawBed(clock); drawBubbles(dt, clock);
+
+    // pass 1 — advance creatures
+    for (const [name, c] of creatures) {
+      if (c.state !== 'leaving' && Date.now() - c.lastSeen > CFG.keepAliveMs) c.state = 'leaving';
+      if (c.state === 'entering') { c.arrive += dt / CFG.arriveSec; if (c.arrive >= 1) { c.arrive = 1; c.state = 'in'; } }
+      else if (c.state === 'leaving') { c.arrive -= dt / CFG.leaveSec; if (c.arrive <= 0) { creatures.delete(name); continue; } }
+      c.r += (c.rT - c.r) * CFG.ease.r; c.cpu += (c.cpuT - c.cpu) * CFG.ease.cpu;
+      const arrE = easeOut(c.arrive);
+      c.act = clamp(c.cpu / CFG.speed.cpuRef, 0, 1);
+      c.rDraw = c.r * lerp(CFG.far.scale, 1, arrE); c.turn = lerp(CFG.far.turn, 1, arrE); c.turnY = lerp(CFG.far.yscale, 1, arrE); c.alpha = lerp(CFG.far.alpha, 1, arrE);
+      c.wig = c.t * (CFG.wiggle.base + c.k.spd * 4 + c.act * CFG.wiggle.cpu);
+      c.boost *= CFG.crab.decay;
+      const edgeB = 1 + CFG.edge.boost * clamp(1 - Math.min(Math.abs(c.x), Math.abs(W - c.x)) / CFG.edge.zone, 0, 1);
+      let base = (CFG.speed.floor + (CFG.speed.ceil - CFG.speed.floor) * c.act) * c.k.spd;
+      if (c.k.shape === 'crab') base = Math.max(base, CFG.crab.crawl);            // steady crawl so crabs traverse & wrap
+      const spd = base * c.person * arrE * edgeB * (1 + c.boost);
+      c.t += dt; c.x += c.dir * spd * dt * M;
+      const marg = c.rDraw + 8; if (c.x > W + marg) c.x = -marg; else if (c.x < -marg) c.x = W + marg;   // wrap as soon as fully offscreen, so they re-enter promptly
+      const baseY = waterY + c.frac * (bedY - waterY);
+      if (c.k.shape === 'jelly') c.swimY = baseY + Math.sin(c.t * .5) * CFG.bob.jellyDrift * M;
+      else if (c.k.shape === 'crab') c.swimY = bedY - c.rDraw * .35;
+      else { const amp = (c.k.shape === 'school' ? CFG.bob.school : CFG.bob.fish) * M * (1 + c.act * CFG.bob.cpuBoost); c.swimY = baseY + Math.sin(c.t * .7 + c.bob) * amp; }
+      c.avoidY *= CFG.ease.avoidDecay; c.labelOff.x *= CFG.label.decay; c.labelOff.y *= CFG.label.decay;
+      c.labelName = c.k.shape === 'school' ? `${c.name} ×${c.count}` : c.name;
+      c.labelHW = c.labelName.length * CFG.label.charW / 2;
+    }
+
+    const arr = [...creatures.values()];
+    // pass 2 — body avoidance (crabs push harder)
+    for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) {
+      const a = arr[i], b = arr[j], ay = a.swimY + a.avoidY, by = b.swimY + b.avoidY;
+      const dx = b.x - a.x, dy = by - ay, d = Math.hypot(dx, dy), min = (a.rDraw + b.rDraw) * CFG.avoid.gap;
+      if (a.k.shape === 'crab' && b.k.shape === 'crab' && d < min * CFG.crab.near && d > .01) {
+        const big = a.rDraw >= b.rDraw ? a : b, small = big === a ? b : a;   // larger crab scoots clear rather than shoving
+        big.boost = CFG.crab.boost; big.dir = big.x >= small.x ? 1 : -1;
+      }
+      if (d < min && d > .01) {
+        const p = (min - d) / min * CFG.avoid.push * dt;
+        const ux = dx / d, uy = dy / d, sl = p * CFG.avoid.slide;   // + tangential slide so head-on pairs slip past instead of butting
+        a.x += -ux * p - uy * sl; b.x += ux * p + uy * sl;          // (tangent = (-uy, ux); a & b take opposite ends)
+        if (a.k.shape !== 'crab') a.avoidY += (-uy * p + ux * sl) * CFG.avoid.yBias;
+        if (b.k.shape !== 'crab') b.avoidY += (uy * p - ux * sl) * CFG.avoid.yBias;
+      }
+    }
+    // pass 2b — label repulsion (keep tags from overlapping; crab tags push harder)
+    if (showLabels) for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) {
+      const a = arr[i], b = arr[j];
+      const ax = a.x + a.labelOff.x, ay = a.swimY + a.avoidY - a.rDraw + a.labelOff.y;
+      const bx = b.x + b.labelOff.x, by = b.swimY + b.avoidY - b.rDraw + b.labelOff.y;
+      const ox = (a.labelHW + b.labelHW + 6) - Math.abs(bx - ax), oy = 15 - Math.abs(by - ay);
+      if (ox > 0 && oy > 0) {
+        const f = (a.k.shape === 'crab' || b.k.shape === 'crab') ? CFG.label.crabPush : CFG.label.push;
+        if (ox < oy * 3) { const s = Math.sign(bx - ax || rand() - .5) * ox * .5 * f; a.labelOff.x -= s; b.labelOff.x += s; }
+        else { const s = Math.sign(by - ay || 1) * oy * .5 * f; a.labelOff.y -= s; b.labelOff.y += s; }
+      }
+    }
+
+    // pass 3 — draw + labels
+    let hov = null, hd = 46;
+    for (const c of arr) { const d = Math.hypot(c.x - mouse.x, (c.swimY + c.avoidY) - mouse.y); if (d < c.rDraw + 16 && d < hd) { hd = d; hov = c; } }
+    for (const c of arr) {
+      const y = c.swimY + c.avoidY, r = c.rDraw, k = c.k.shape;
+      if (k === 'jelly') drawJelly(c, c.x, y, r, clock);
+      else if (k === 'whale') drawWhale(c, c.x, y, r);
+      else if (k === 'squid') drawSquid(c, c.x, y, r);
+      else if (k === 'ray') drawRay(c, c.x, y, r);
+      else if (k === 'angler') drawAngler(c, c.x, y, r, clock);
+      else if (k === 'crab') drawCrab(c, c.x, y, r);
+      else if (k === 'school') { for (const o of c.off) drawFish(c, c.x + o.dx + Math.sin(c.t * 2 + o.ph) * 8, y + o.dy + Math.cos(c.t * 2 + o.ph) * 8, r * CFG.radius.schoolFish); }
+      else drawFish(c, c.x, y, r);
+      ctx.globalAlpha = 1;
+      if (showLabels || hov === c) label(hov === c ? `${c.labelName} · ${c.mem} MiB` : c.labelName, c.x + c.labelOff.x, y - r - (k === 'whale' ? r * .5 : 8) + c.labelOff.y, hov === c);
+    }
+    ctx.globalAlpha = 1;
+    drawSurface(clock);
+    requestAnimationFrame(frame);
+  }
+
+  /* ======================= polling ======================= */
+  const liveEl = document.getElementById('live'), connEl = document.getElementById('conn'), statsEl = document.getElementById('stats');
+  const hostEl = document.getElementById('host');
+  function applyState(d) {
+    Object.assign(S, { cpu: d.cpu, load: d.load, load5: d.load5, cores: d.cores, memPct: d.memPct, swapPct: d.swapPct, temp: d.temp, disk: d.disk, alarms: d.alarms, alerts: d.alerts || [], containers: d.containers, uptime: d.uptime });
+    const nowMs = Date.now(); tempHist.push([nowMs, d.temp]);                       // 15s mean smooths the stepped temp
+    while (tempHist.length && nowMs - tempHist[0][0] > CFG.tempWindowMs) tempHist.shift();
+    S.tempMean = tempHist.reduce((a, e) => a + e[1], 0) / tempHist.length;
+    const w = CFG.weather, wx = clamp(S.load5 / Math.max(1, S.cores), 0, CFG.wxMax);
+    const wi = clamp((wx - w.floor) / (CFG.wxMax - w.floor), 0, 1);                 // 0 = calm, 1 = full storm
+    env.wi = wi;
+    env.cloudCount = Math.round(w.cloudBase + wi * w.cloudGain);
+    env.cloudSize = w.sizeBase + wi * w.sizeGain;
+    env.wind = w.windBase + wi * w.windGain;
+    env.waveAmp = w.waveBase + wi * w.waveGain;
+    env.rockCount = CFG.disk.base + Math.round(Math.pow(clamp((S.disk - CFG.disk.knee) / (100 - CFG.disk.knee), 0, 1), CFG.disk.exp) * (CFG.disk.max - CFG.disk.base));
+    env.stormAT = S.alarms > 0 ? 1 : 0;
+    reconcile(d.roster || []);
+    if (d.host && hostEl.textContent !== d.host) hostEl.textContent = d.host;
+    statsEl.innerHTML = `up <b>${d.uptime}</b><br>load5 <b>${d.load5}</b>/${d.cores} · cpu <b>${d.cpu}%</b> · <b>${d.temp}°</b><br>mem <b>${d.memPct}%</b> · swap <b>${d.swapPct}%</b> · disk <b>${d.disk}%</b><br><b>${d.containers}</b> containers · <b>${d.alarms}</b> alert${d.alarms === 1 ? '' : 's'}`;
+    lastUpdate = Date.now(); connState = 'live';
+  }
+  async function poll() {
+    try { const r = await fetch('/state.json', { cache: 'no-store' }); if (!r.ok) throw 0; applyState(await r.json()); }
+    catch (e) { connState = (Date.now() - lastUpdate > 15000 || !lastUpdate) ? 'down' : 'stale'; }
+  }
+  setInterval(() => {
+    const age = lastUpdate ? Math.round((Date.now() - lastUpdate) / 1000) : null;
+    if (connState === 'live') { liveEl.className = 'live'; connEl.textContent = 'live · updated ' + (age <= 1 ? 'just now' : age + 's ago'); }
+    else if (connState === 'stale') { liveEl.className = 'live stale'; connEl.textContent = `reconnecting… (${age}s)`; }
+    else if (connState === 'down') { liveEl.className = 'live down'; connEl.textContent = 'no connection'; }
+  }, 1000);
+
+  /* ======================= boot ======================= */
+  function resize() {
+    DPR = Math.min(2, devicePixelRatio || 1); W = innerWidth; H = innerHeight;
+    cv.width = W * DPR; cv.height = H * DPR; cv.style.width = W + 'px'; cv.style.height = H + 'px';
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    waterY = H * CFG.waterLevelF; bedY = H * CFG.bedFrac;
+  }
+  addEventListener('resize', resize);
+  addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+  addEventListener('mouseleave', () => { mouse.x = mouse.y = -999; });
+  document.getElementById('lbl').addEventListener('click', e => { showLabels = !showLabels; e.currentTarget.textContent = 'labels: ' + (showLabels ? 'on' : 'off'); });
+
+  (async () => {
+    await loadKinds();                                   // fetch creature rules before first paint
+    resize(); poll(); setInterval(poll, CFG.pollMs); requestAnimationFrame(frame);
+  })();
+})();
+</script>
+</body>
+</html>

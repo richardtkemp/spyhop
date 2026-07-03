@@ -1,0 +1,14 @@
+{
+  "_comment": "Copy to ~/.config/spyhop/config.json (recommended) or to spyhop.config.json next to spyhop.py, then edit. Everything is optional. `creatures` entries are matched BEFORE the built-in defaults, so they win. `muteAlerts` hides noisy netdata alerts so they don't rain. Restart spyhop to apply. See the README for the full field reference.",
+
+  "creatures": [
+    { "match": "postgres|postgresql", "shape": "crab",  "hue": 210, "always": true },
+    { "match": "nginx",               "shape": "ray",   "hue": 130 },
+    { "match": "ollama|llama",        "shape": "whale",  "always": true },
+    { "match": "my-service",          "shape": "school", "hue": 285, "spd": 0.9 }
+  ],
+
+  "muteAlerts": [
+    "inbound_packets_dropped"
+  ]
+}

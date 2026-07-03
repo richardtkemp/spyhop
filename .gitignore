@@ -1,0 +1,7 @@
+# Local, per-host creature pins — keep personal config out of the repo.
+# (spyhop also looks in ~/.config/spyhop/config.json; either works.)
+spyhop.config.json
+
+__pycache__/
+*.pyc
+*.log

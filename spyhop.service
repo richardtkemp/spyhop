@@ -1,0 +1,18 @@
+[Unit]
+Description=spyhop — a living-ocean telemetry wallpaper server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Set these two to wherever you cloned spyhop (absolute paths, no shell expansion).
+WorkingDirectory=/path/to/spyhop
+ExecStart=/usr/bin/python3 /path/to/spyhop/spyhop.py
+Environment=SPYHOP_PORT=8477
+Environment=PYTHONUNBUFFERED=1
+Restart=always
+RestartSec=3
+Nice=5
+
+[Install]
+WantedBy=default.target
