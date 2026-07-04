@@ -12,7 +12,8 @@ Configuration (all optional, data not code — see load_config() for the search
 path: $SPYHOP_PORT overrides the port; $SPYHOP_CONFIG -> ~/.config/spyhop/
 config.json -> ./spyhop.config.json for the JSON below):
   { "creatures":  [ {match, shape, hue, ...}, ... ],   # pin processes to creatures
-    "muteAlerts": [ "regex", ... ] }                    # hide noisy netdata alerts
+    "muteAlerts": [ "regex", ... ],                     # hide noisy netdata alerts
+    "render":     { fps, dpr, wiggle } }                # render trade-offs (see RENDER_DEFAULTS)
   Creature entries are matched before DEFAULT_CREATURES, so they override the
   defaults without editing this file. The client fetches /config.json and
   renders from it, so this table is the single source of truth for both
@@ -136,6 +137,47 @@ ALWAYS_RE   = _compile_union([c["match"] for c in CREATURES if c.get("always")],
 MUTE_ALERTS = _compile_union(CONFIG.get("muteAlerts") or CONFIG.get("mute_alerts") or [], "muteAlerts")
 if MUTE_ALERTS:
     print("spyhop: muting alerts matching /%s/i" % MUTE_ALERTS.pattern)
+
+# Render trade-offs the client honours (URL query params still override, for benchmarking).
+# These are genuine trade-offs, not strict wins, so they're config knobs:
+#   fps    frame-rate cap; 0 = uncapped. Lower = cheaper, less smooth. (In Übersicht the
+#          scene is a cross-origin iframe, which WebKit throttles to ~30fps, so >30 is
+#          moot there — the real lever is going below 30.)
+#   dpr    device-pixel-ratio cap; 0 = native (full sharpness). Cheap to keep at native
+#          on a draw-call-bound scene, but a lever on fill-bound GPUs.
+#   wiggle creature secondary animation (tail/pulse). false = rigid (cheaper to cache).
+#   windTiers  wind streaks: bucket the tail fade into N opacity/width tiers -> N strokes
+#              per streak instead of ~44. 0 = disabled (per-segment, original look). Lower
+#              N = cheaper, more stepped fade.
+#   windLength wind-streak trail length in points (default 44). Shorter = fewer segments.
+#   windAlphaMin / windAlphaMax  remap the tail->head alpha fade to [min,max] (still ×wind).
+#              Default 0..1 (tail fades to nothing). Raise min so the tail stays visible
+#              rather than spending draws on near-invisible segments.
+#   spritePhases  cache each creature as an N-phase bitmap atlas and blit one drawImage
+#              per frame instead of re-pathing + re-gradient-filling. 0 = live drawing
+#              (original). N only trades memory (N sprites/creature) vs wiggle smoothness;
+#              per-frame CPU is flat in N.
+RENDER_DEFAULTS = {"fps": 30, "dpr": 0, "wiggle": True, "windTiers": 0,
+                   "windLength": 44, "windAlphaMin": 0.0, "windAlphaMax": 1.0,
+                   "spritePhases": 0}
+def _render(doc):
+    r = dict(RENDER_DEFAULTS)
+    user = doc.get("render")
+    if isinstance(user, dict):
+        for k in RENDER_DEFAULTS:
+            if k in user:
+                r[k] = user[k]
+    r["fps"] = max(0, int(r["fps"] or 0))
+    r["dpr"] = max(0, float(r["dpr"] or 0))
+    r["wiggle"] = bool(r["wiggle"])
+    r["windTiers"] = max(0, int(r["windTiers"] or 0))
+    r["windLength"] = max(2, int(r["windLength"] or 44))
+    r["windAlphaMin"] = max(0.0, float(r["windAlphaMin"] or 0))
+    r["windAlphaMax"] = max(0.0, float(r["windAlphaMax"] or 0))
+    r["spritePhases"] = max(0, int(r["spritePhases"] or 0))
+    return r
+RENDER = _render(CONFIG)
+print("spyhop: render", RENDER)
 # interpreters whose comm ("python3", "java", …) is uninformative — dig a real name out of argv
 GENERIC_PREFIX = ("python", "node", "java", "php", "ruby", "perl", "mono", "dotnet")
 GENERIC_EXACT  = {"sh", "bash", "nodejs", "deno", "bun", "tsx"}
@@ -288,7 +330,7 @@ def uptime_str():
 def loadavgs():
     with open("/proc/loadavg") as f:
         a = f.readline().split()
-    return round(float(a[0]), 2), round(float(a[1]), 2)     # 1m, 5m
+    return round(float(a[0]), 2), round(float(a[1]), 2), round(float(a[2]), 2)     # 1m, 5m, 15m
 
 
 def _sample_procs():
@@ -414,10 +456,10 @@ def slow_signals():
 def build_state():
     cpu = cpu_busy_pct()
     mem_pct, swap_pct = meminfo()
-    load1, load5 = loadavgs()
+    load1, load5, load15 = loadavgs()
     alarms, containers, alerts, disk = slow_signals()
     return {"t": int(time.time()), "host": os.uname().nodename, "uptime": uptime_str(),
-            "cpu": cpu if cpu is not None else 0.0, "load": load1, "load5": load5,
+            "cpu": cpu if cpu is not None else 0.0, "load": load1, "load5": load5, "load15": load15,
             "cores": os.cpu_count(), "memPct": mem_pct, "swapPct": swap_pct, "temp": cpu_temp(),
             "disk": disk, "alarms": alarms, "alerts": alerts, "containers": containers, "roster": roster()}
 
@@ -450,7 +492,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/state.json":
                 self._send(200, json.dumps(cached_state()), "application/json")
             elif path == "/config.json":
-                self._send(200, json.dumps({"creatures": CREATURES}), "application/json")
+                self._send(200, json.dumps({"creatures": CREATURES, "render": RENDER}), "application/json")
             elif path == "/health":
                 self._send(200, "ok", "text/plain")
             else:

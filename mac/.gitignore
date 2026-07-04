@@ -1,0 +1,3 @@
+# build artifacts (produced by build.sh on the Mac)
+.build/
+Spyhop.app/

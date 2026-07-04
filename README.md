@@ -69,6 +69,16 @@ battery** in Plash's settings for laptops.
 command-driven widgets — you'd wrap a webview in a widget, which is fiddlier
 than Plash for a full-page URL.
 
+### macOS — native app (`mac/`)
+
+For a lighter, multi-display alternative to the web-in-Plash route, there's a
+native **SpriteKit** build in [`mac/`](mac/). It's a third telemetry client
+that talks to the same server, renders the identical scene on the GPU at
+**~3× lower CPU and less than half the memory** of the WebView, and covers an
+arbitrary number of displays with a menu-bar screen picker. It builds with the
+Command Line Tools only (no Xcode). See [`mac/README.md`](mac/README.md) for
+build and run instructions.
+
 ### Linux / Windows
 
 Any browser in fullscreen/kiosk mode pointed at the URL, or a wallpaper tool
