@@ -13,10 +13,15 @@ swiftc -O \
     -framework AppKit -framework SpriteKit \
     -target arm64-apple-macosx13.0
 
+# App icon: render the tray whale onto an ocean gradient .icns (needs iconutil).
+swiftc -O -o .build/generate-icon generate-icon.swift -framework AppKit
+.build/generate-icon .build/AppIcon.icns
+
 APP="Spyhop.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/Spyhop "$APP/Contents/MacOS/Spyhop"
+cp .build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp Info.plist "$APP/Contents/Info.plist"
 codesign --force --sign - "$APP" >/dev/null 2>&1 || true
 echo "built $(pwd)/$APP"

@@ -75,8 +75,15 @@ final class WaterFX {
         waterY + sin(x * 0.02 + t * 1.4 * M) * waveAmp + sin(x * 0.05 - t * M) * waveAmp * 0.4
     }
 
-    func update(dt: Double, clock: Double, wind: Double, waveAmp: Double, wi: Double, motionScale: Double) {
+    func update(dt: Double, clock: Double, wind: Double, waveAmp: Double, wi: Double, motionScale: Double, sunH: Double) {
         let t = CGFloat(clock), M = CGFloat(motionScale), wnd = CGFloat(wind), wave = CGFloat(waveAmp)
+        // God rays converge on whichever light is brighter (a shaft comes from one source, not a
+        // blend): sun brightness ∝ sunH; the moon dims to ~0.22 by day. Aim each beam to hit it.
+        let df = CGFloat(sunH)
+        let sunLit = df > 1 - df * 0.78
+        let godSrcX = sunLit ? W * 0.18 : W * 0.82                         // the brighter light's x
+        let godSrcY = sunLit ? waterY + (H * 0.12 - waterY) * df : H * 0.12   // its height (sim y-down)
+        let godGap = max(H * 0.08, waterY - godSrcY)                       // surface→light drop, clamped off the horizon
 
         // godrays: clipped to the wavy foreground water; each beam has its own random lifecycle
         let mp = CGMutablePath()
@@ -92,6 +99,7 @@ final class WaterFX {
             let b = godBeams[i]
             let env = min(min(b.age / 1.5, (b.life - b.age) / 1.5), 1)   // fade in over 1.5s, hold, fade out
             b.node.position = CGPoint(x: b.x, y: H - waterY + wave + 20)   // top above the crests; mask trims it to the surface
+            b.node.zRotation = max(-1.05, min(1.05, atan2(b.x - godSrcX, godGap)))   // aim the beam at the light
             b.node.alpha = max(0, env) * b.peak
         }
         let capA = CGFloat(clampD((wi - 0.45) * 0.5, 0, 0.3))   // whitecaps at high wind

@@ -45,6 +45,23 @@ Requirements: Python 3.8+ (standard library only). `docker` and a local
 container count and alert rain — both are optional; without them those signals
 just read zero.
 
+### Running the server on a different host
+
+You watch whichever machine the server runs on, so `spyhop.py` belongs on *that*
+host — which needn't be the one you edit on. Because it's a single
+standard-library file with no build step, you don't need the whole repo on the
+target: copy just the script (developing on your laptop, deploying to a home
+server, say) and run it there.
+
+```sh
+scp spyhop.py you@server:~/            # deploy from your dev machine
+ssh you@server 'python3 ~/spyhop.py'   # or wire it up as a service (see below)
+```
+
+Then point any client — a browser, Plash, or the native app — at
+`http://<server-lan-ip>:8477/`. For an always-on install, see
+[Run it permanently](#run-it-permanently-systemd-user-service).
+
 ## Use it as a live desktop wallpaper
 
 The page is one self-contained URL, so any "web page as wallpaper" tool works.
@@ -117,6 +134,7 @@ changes.
 | --- | --- | --- |
 | `match` | ✅ | Case-insensitive regex tested against the process' display name. First match wins. |
 | `shape` | | One of: `angler`, `whale`, `jelly`, `squid`, `ray`, `fish`, `school`, `crab`. Defaults to `fish`. |
+| `detail` | | `simple` or `complex` body art. Omit to follow `render.creatureDetail` (default `complex`). Whales have a single form and ignore it. |
 | `hue` | | 0–360. Omit and a stable colour is derived from the name. |
 | `sat`, `lit` | | HSL saturation / lightness (0–100). |
 | `spd` | | Relative swim speed (~0.2 slow … ~1.0 fast). |

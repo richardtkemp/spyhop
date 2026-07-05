@@ -46,14 +46,14 @@
     pollMs: 4000, keepAliveMs: 60000,
     arriveSec: 1.5, leaveSec: 5.1,                             // swim-away is slow (~3x the arrival)
     far: { scale: 0.12, turn: 0.18, yscale: 0.28, alpha: 0.12 },// receding also flattens on Y
-    ease: { r: 0.06, cpu: 0.05, storm: 0.12, avoidDecay: 0.86, temp: 0.05 },
+    ease: { r: 0.06, cpu: 0.05, cpuSlow: 0.012, storm: 0.12, avoidDecay: 0.86, temp: 0.05 },   // cpu: wiggle (momentary) · cpuSlow: speed (~3s integral)
     speed: { floor: 8, ceil: 95, cpuRef: 90 },
     edge: { zone: 90, boost: 2.4 },                            // speed up near the screen edges so nobody loiters
-    wiggle: { base: 4, cpu: 7 },
-    bob: { fish: 16, school: 14, cpuBoost: 0.7, jellyDrift: 40 },
+    wiggle: { base: 4, cpu: 7, sizeRef: 24, sizeMin: 0.4 },       // sizeRef/sizeMin: bigger creatures beat fins slower
+    bob: { fish: 16, school: 14, cpuBoost: 0.7, jellyDrift: 40, jellyRate: 0.35 },   // jellyRate: bell pulses/sec
     radius: { base: 6, memK: 0.85, max: 58, schoolFish: 0.9 },
     avoid: { gap: 0.72, push: 90, yBias: 1.0, slide: 1.8 },    // slide: strong tangential unstick so head-on pairs pass
-    crab: { near: 1.7, boost: 2.8, decay: 0.9, crawl: 1 },     // near crabs: the larger scoots away; crawl: steady min speed
+    crab: { near: 1.7, boost: 2.8, decay: 0.9, crawl: 1, dirLock: 0.6 },   // near crabs: the larger scoots away; dirLock: min s before it may flip again
     label: { push: 0.45, crabPush: 1.0, charW: 6.4, decay: 0.82 },
     tempWindowMs: 15000,                                       // mean cpu-temp window for the thermal glow
     waterLevelF: 0.30, bedFrac: 0.90, wxMax: 1.6,
@@ -104,16 +104,21 @@
       sat: c.sat ?? 50, lit: c.lit ?? 58,
       spd: c.spd ?? (0.5 + (h % 30) / 60),
       band: Array.isArray(c.band) ? c.band : [.40, .78],
-      mul: c.mul, always: c.always,
+      mul: c.mul, always: c.always, detail: normDetail(c.detail),
     };
   }
-  async function loadKinds() {
+  // Body detail level. Per-creature `detail` wins; else the global default (server render
+  // .creatureDetail, or 'complex'); a ?detail= URL param force-overrides every creature (this client).
+  const normDetail = v => (v === 'simple' || v === 'complex') ? v : null;
+  const detailOf = k => DETAIL_FORCE ?? k.detail ?? DETAIL_DEFAULT;
+  async function loadConfig() {
     try {
       const r = await fetch('/config.json', { cache: 'no-store' });
       if (!r.ok) throw 0;
-      const { creatures } = await r.json();
-      KINDS = (creatures || []).map(c => { try { return specToKind(c); } catch { return null; } }).filter(Boolean);
-    } catch (e) { /* leave KINDS empty -> hash-coloured fallback below */ }
+      const cfg = await r.json();
+      KINDS = (cfg.creatures || []).map(c => { try { return specToKind(c); } catch { return null; } }).filter(Boolean);
+      applyRender(cfg.render);
+    } catch (e) { applyRender(null); /* config unreachable -> defaults + any URL overrides */ }
   }
   function kindOf(name) {
     const s = name.toLowerCase();
@@ -138,9 +143,59 @@
   const WATER_D = [[86, 168, 190], [46, 120, 150], [22, 78, 104]];
   const CLOUD_PUFFS = [[0, 0, 1], [.6, .1, .8], [-.6, .12, .75], [.25, -.2, .7], [-.25, -.15, .65]];
 
-  const cv = document.getElementById('pond'), ctx = cv.getContext('2d');
+  const cv = document.getElementById('pond'); let ctx = cv.getContext('2d');   // `let` so sprite baking can redirect it into an offscreen canvas
   const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
   const M = reduce ? 0.2 : 1;
+  // Wallpaper mode: ?mode=wallpaper (or ?fps=N) caps the frame rate to keep CPU
+  // low when the scene runs behind the desktop all day. Default (no param) is
+  // uncapped for normal browser viewing.
+  const PARAMS = new URLSearchParams(location.search);
+  const DEBUG = PARAMS.has('debug');
+  const OFF = new Set((PARAMS.get('off') || '').split(',').filter(Boolean));               // ?off=sky,water,bed,bubbles,creatures,surface — disable draws to profile each
+  const SHOT = +PARAMS.get('shot') || 0;                                                    // ?shot=N — run N seconds then freeze (one settled frame, for screenshots)
+  const BENCH = PARAMS.has('bench');                                                         // ?bench — fixed synthetic workload (no polling) for reproducible benchmarks
+  const DAYNIGHT = PARAMS.has('daynight');                                                   // ?daynight — slowly cycle temp (sun<->moon) for VISUAL testing; keep OFF for perf runs
+  // Deterministic *all-elements* scene, so the render cost is identical run-to-run (real
+  // telemetry drifts with load and masks deltas). Values are cranked so every subsystem is
+  // exercised: high load5 -> full clouds + overcast + strong wind streaks; swap>90 -> lightning;
+  // alarms + WARNING/CRITICAL alerts -> rain + alert text; high disk -> rocks; mid temp ->
+  // twilight (stars + moon + sun + thermal glow); plus every creature shape below.
+  const BENCH_STATE = {
+    host: 'bench', uptime: '7d 0h', cpu: 78, load: 5.0, load5: 5.5, cores: 4,
+    memPct: 82, swapPct: 95, temp: 62, tempMean: 62, disk: 85, alarms: 2,
+    alerts: [{ n: 'cpu_pressure', s: 'WARNING', v: 88, u: '%' }, { n: 'disk_space', s: 'CRITICAL', v: 96, u: '%' }],
+    containers: 9,
+    roster: [
+      { n: 'spyhop', m: 60, c: 1, cpu: 5 }, { n: 'qemu', m: 2048, c: 1, cpu: 40 },
+      { n: 'netdata', m: 180, c: 1, cpu: 8 }, { n: 'opencode', m: 320, c: 1, cpu: 25 },
+      { n: 'foci', m: 150, c: 1, cpu: 10 }, { n: 'firefox', m: 900, c: 1, cpu: 30 },
+      { n: 'claude', m: 400, c: 4, cpu: 35 }, { n: 'kworker', m: 50, c: 8, cpu: 12 },
+      { n: 'pihole', m: 120, c: 1, cpu: 6 }, { n: 'radarr', m: 200, c: 1, cpu: 15 },
+      { n: 'sonarr', m: 210, c: 1, cpu: 12 }, { n: 'postgres', m: 300, c: 1, cpu: 20 },
+      { n: 'python-worker', m: 250, c: 1, cpu: 18 }, { n: 'dockerd', m: 180, c: 1, cpu: 9 },
+      { n: 'node-app', m: 280, c: 1, cpu: 22 }, { n: 'redis', m: 90, c: 1, cpu: 7 },
+      { n: 'nginx', m: 70, c: 1, cpu: 5 }, { n: 'java-svc', m: 1200, c: 1, cpu: 28 },
+    ],
+  };
+  // Render trade-offs: built-in defaults <- server /config.json render <- URL params (override, for benchmarking).
+  let FPS_CAP = 30, FRAME_MIN = 0, DPR_CAP = 0, WIG_MODE = 'high', WIND_TIERS = 0, WIND_LEN = 44, WIND_A0 = 0, WIND_A1 = 1, SPRITE_PHASES = 0;   // WIG_MODE 'high' (animated) | 'none' (rigid)
+  let DETAIL_DEFAULT = 'complex', DETAIL_FORCE = null;   // global default · ?detail= client override (forces all)
+  function applyRender(cfg) {
+    cfg = cfg || {};
+    const pick = k => PARAMS.has(k) ? PARAMS.get(k) : cfg[k];
+    FPS_CAP = Math.max(0, +(pick('fps') ?? 30) || 0);
+    DPR_CAP = Math.max(0, +(pick('dpr') ?? 0) || 0);
+    const w = pick('wiggle') ?? 'high';
+    WIG_MODE = (w === false || w === 'false' || w === '0' || w === 0 || w === 'none') ? 'none' : 'high';
+    WIND_TIERS = Math.max(0, Math.floor(+(pick('windTiers') ?? 0) || 0));
+    WIND_LEN = Math.max(2, Math.floor(+(pick('windLength') ?? 44) || 44));
+    WIND_A0 = Math.max(0, +(pick('windAlphaMin') ?? 0) || 0);
+    WIND_A1 = Math.max(0, +(pick('windAlphaMax') ?? 1) || 0);
+    SPRITE_PHASES = Math.max(0, Math.floor(+(pick('spritePhases') ?? 0) || 0));
+    DETAIL_DEFAULT = normDetail(cfg.creatureDetail) ?? 'complex';
+    DETAIL_FORCE = PARAMS.has('detail') ? normDetail(PARAMS.get('detail')) : null;
+    FRAME_MIN = FPS_CAP ? (1 / FPS_CAP) - 0.002 : 0;
+  }
   let W, H, DPR, waterY, bedY;
   let showLabels = true, firstLoad = true;
   const mouse = { x: -999, y: -999 };
@@ -156,6 +211,25 @@
   const S = { cpu: 0, load: 0, load5: 0, cores: 4, memPct: 0, swapPct: 0, temp: 0, tempMean: 0, disk: 0, alarms: 0, alerts: [], containers: 0, uptime: '—' };
   const env = { wi: 0, cloudCount: CFG.weather.cloudBase, cloudSize: CFG.weather.sizeBase, wind: CFG.weather.windBase, waveAmp: CFG.weather.waveBase, stormA: 0, stormAT: 0, rockCount: CFG.disk.base, tempDisp: 0, sunH: 0, sunH1: 0 };
   let lightning = 0, bolt = null, tempHist = [], lastUpdate = 0, connState = 'connecting';
+  // Spyhop: honouring the name, one whale periodically rises vertically to poke its head above the
+  // surface. first fires shortly after load, then on a fixed period; retries sooner if no whale is up.
+  const SPY = { first: 5, period: 180, retry: 20, dur: 7.5, peak: .4, tilt: .85, slow: .82, riseWig: 28, fallWig: 12 };   // peak at 40%: rise ~3s, slower fall ~4.5s, no hold
+  let nextSpyhop = SPY.first;
+  // Spyhop vertical profile 0→1→0 over the animation: smoothstep up, hold at the surface, smoothstep
+  // down. Smoothstep has zero slope at its ends, so takeoff, the top, and the landing are all gentle
+  // (no hard stop) — unlike a sine hump, which arrives at the surface still moving.
+  const smoothstep = t => t * t * (3 - 2 * t);
+  // Jelly propulsion stroke over one bell cycle: a quick contraction (~35%) that jets it up, then a
+  // slow relaxation while it drifts back down — real jellyfish only power the up-stroke, not the down.
+  const jellyPulse = u => { u -= Math.floor(u); return u < .35 ? smoothstep(u / .35) : 1 - smoothstep((u - .35) / .65); };
+  // Smooth raised-cosine hump peaking at SPY.peak (rise faster, fall slower). No flat top: eases into
+  // the peak, kisses the surface still moving, then eases back down — velocity is 0 only at the turnaround.
+  function spyLift(u) {
+    if (u <= 0 || u >= 1) return 0;
+    const p = SPY.peak;
+    return u < p ? .5 - .5 * Math.cos(Math.PI * u / p)
+                 : .5 + .5 * Math.cos(Math.PI * (u - p) / (1 - p));
+  }
 
   /* ======================= creatures ======================= */
   const creatures = new Map();
@@ -165,9 +239,10 @@
     const members = k.shape === 'school' ? clamp(item.c | 0, 2, 8) : 1;
     const c = {
       name: item.n, mem: item.m, count: item.c, k, frac: a + rand() * (b - a),
-      r: 0, rT: radius(per, k.mul), cpu: 0, cpuT: item.cpu || 0, person: .85 + rand() * .3,
-      dir: rand() < .5 ? -1 : 1, t: rand() * 100, bob: rand() * TAU,
+      r: 0, rT: radius(per, k.mul), cpu: 0, cpuSlow: 0, cpuT: item.cpu || 0, person: .85 + rand() * .3,
+      dir: rand() < .5 ? -1 : 1, dirLock: 0, t: rand() * 100, bob: rand() * TAU,
       x: rand() * innerWidth, swimY: 0, avoidY: 0, rDraw: 0, turn: 1, turnY: 1, alpha: 1, act: 0, wig: 0, boost: 0,
+      spy: 0, spyT: 0, spyRot: 0, spyWig: 0, spyLiftPrev: 0,
       labelOff: { x: 0, y: 0 }, labelHW: 0,
       arrive: present ? 1 : 0, state: present ? 'in' : 'entering', lastSeen: Date.now(),
       off: schoolOffs(members),
@@ -193,63 +268,182 @@
   function eyes(r) { ctx.globalCompositeOperation = 'source-over'; dot(r * .5, -r * .12, r * .11 + .6, PAL.eyeWhite); dot(r * .53, -r * .12, r * .055 + .3, PAL.eyeDark); }
 
   function drawFish(c, x, y, r) {
-    begin(c, x, y); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = glow(r * 1.5, c.k);
-    ctx.save(); ctx.rotate(Math.sin(c.wig) * .25); tri(-r * .8, 0, -r * 1.5, -r * .5, -r * 1.5, r * .5); ctx.restore();
-    ellipse(0, 0, r, r * .6); eyes(r); ctx.restore();
+    begin(c, x, y); const cx = detailOf(c.k) === 'complex';
+    ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = glow(r * 1.5, c.k);
+    if (cx) {                                                     // dorsal + pelvic fins (behind body, additive so tips stay translucent)
+      ctx.save(); ctx.rotate(Math.sin(c.wig + 1) * .08); tri(-r * .1, -r * .5, r * .4, -r * .5, -r * .35, -r * 1.05); ctx.restore();
+      tri(r * .05, r * .5, r * .35, r * .5, -r * .1, r * .95);
+    }
+    ctx.save(); ctx.rotate(Math.sin(c.wig) * .25);                // caudal fin (forked when complex)
+    if (cx) { ctx.beginPath(); ctx.moveTo(-r * .8, 0); ctx.lineTo(-r * 1.6, -r * .55); ctx.lineTo(-r * 1.2, 0); ctx.lineTo(-r * 1.6, r * .55); ctx.closePath(); ctx.fill(); }
+    else tri(-r * .8, 0, -r * 1.5, -r * .5, -r * 1.5, r * .5);
+    ctx.restore();
+    ellipse(0, 0, r, r * .6);
+    if (cx) {                                                     // markings — source-over so they read over the glow body
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = col(c.k, 20, .28); ellipse(r * .1, r * .22, r * .78, r * .26);   // belly sheen
+      ctx.lineCap = 'round'; ctx.lineWidth = Math.max(1, r * .045);
+      ctx.strokeStyle = col(c.k, -18, .5); ctx.beginPath(); ctx.moveTo(r * .42, -r * .4); ctx.quadraticCurveTo(r * .3, 0, r * .42, r * .4); ctx.stroke();   // gill cover
+      ctx.strokeStyle = col(c.k, -10, .32);
+      for (const bx of [-r * .1, -r * .45]) { ctx.beginPath(); ctx.moveTo(bx, -r * .45); ctx.quadraticCurveTo(bx - r * .06, 0, bx, r * .45); ctx.stroke(); }   // flank bars
+    }
+    eyes(r); ctx.restore();
+  }
+  // Creature sprite atlas (fish/school): bake each (colour, radius, wiggle-phase) once, then
+  // blit one drawImage/frame instead of re-pathing + re-gradient-filling. ?spritePhases=N.
+  // Per-frame CPU is flat in N; N only trades memory vs wiggle smoothness. NB: the additive
+  // glow is baked in and composited source-over, so it reads slightly less luminous than live.
+  const _sprites = new Map(); let _spriteBytes = 0;
+  function bakeFish(k, r, pi) {
+    const half = r * 1.6, side = Math.ceil(half * 2);
+    const oc = document.createElement('canvas'); oc.width = Math.ceil(side * DPR); oc.height = Math.ceil(side * DPR);
+    const b = oc.getContext('2d'); b.setTransform(DPR, 0, 0, DPR, 0, 0);
+    const prev = ctx; ctx = b;                                     // redirect the shared ctx into the bake canvas
+    drawFish({ k, wig: pi / SPRITE_PHASES * TAU, dir: 1, turn: 1, turnY: 1, alpha: 1 }, half, half, r);
+    ctx = prev;
+    _spriteBytes += oc.width * oc.height * 4;
+    return { canvas: oc, half, side };
+  }
+  function blitFish(c, x, y, r) {
+    const rB = Math.max(4, Math.round(r));
+    const pi = Math.floor((((c.wig % TAU) + TAU) % TAU) / TAU * SPRITE_PHASES) % SPRITE_PHASES;
+    const key = c.k.hue + ',' + c.k.sat + ',' + c.k.lit + '|' + rB + '|' + pi;
+    let sp = _sprites.get(key);
+    if (!sp) { sp = bakeFish(c.k, rB, pi); _sprites.set(key, sp); }
+    ctx.save(); ctx.globalAlpha = c.alpha; ctx.translate(x, y); ctx.scale(c.dir * c.turn, c.turnY);
+    ctx.drawImage(sp.canvas, -sp.half, -sp.half, sp.side, sp.side); ctx.restore();
   }
   function drawWhale(c, x, y, r) {
-    begin(c, x, y); const g = ctx.createLinearGradient(0, -r * .6, 0, r * .6); g.addColorStop(0, col(c.k, 6, .95)); g.addColorStop(1, col(c.k, -18, .95)); ctx.fillStyle = g;
-    ctx.save(); ctx.rotate(Math.sin(c.wig) * .12); ctx.beginPath(); ctx.moveTo(-r * .9, 0); ctx.quadraticCurveTo(-r * 1.5, -r * .6, -r * 1.7, -r * .1); ctx.quadraticCurveTo(-r * 1.5, r * .05, -r * .9, 0); ctx.fill(); ctx.restore();
-    ellipse(0, 0, r, r * .52); ctx.fillStyle = col(c.k, 18, .35); ellipse(r * .1, r * .18, r * .85, r * .28);
-    dot(r * .55, -r * .14, r * .06 + 1, PAL.eyeWhite); ctx.restore();
+    begin(c, x, y); if (c.spyRot) ctx.rotate(c.spyRot);                              // tilt nose-up while spyhopping
+    const g = ctx.createLinearGradient(0, -r * .6, 0, r * .6); g.addColorStop(0, col(c.k, 6, .95)); g.addColorStop(1, col(c.k, -18, .95)); ctx.fillStyle = g;
+    ctx.save(); ctx.rotate(Math.sin(c.wig) * .12);                                   // notched two-lobe fluke
+    ctx.beginPath(); ctx.moveTo(-r * .85, 0);
+    ctx.quadraticCurveTo(-r * 1.4, -r * .25, -r * 1.8, -r * .6); ctx.quadraticCurveTo(-r * 1.5, -r * .18, -r * 1.32, 0);
+    ctx.quadraticCurveTo(-r * 1.5, r * .18, -r * 1.8, r * .6); ctx.quadraticCurveTo(-r * 1.4, r * .25, -r * .85, 0);
+    ctx.closePath(); ctx.fill(); ctx.restore();
+    ellipse(0, 0, r, r * .52);                                                       // body
+    ctx.fillStyle = col(c.k, 18, .35); ellipse(r * .1, r * .18, r * .85, r * .28);    // belly
+    ctx.fillStyle = col(c.k, -14, .92);                                              // pectoral flipper (paddles with wig)
+    const ft = Math.sin(c.wig) * r * .12;   // whale keeps full motion even in low mode
+    ctx.beginPath(); ctx.moveTo(r * .34, r * .24); ctx.quadraticCurveTo(r * .3, r * .62, r * .02 + ft, r * .95); ctx.quadraticCurveTo(-r * .15, r * .7, r * .05, r * .26); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = col(c.k, -20, .55); ctx.lineWidth = Math.max(1, r * .03); ctx.lineCap = 'round';   // jaw line
+    ctx.beginPath(); ctx.moveTo(r * .3, r * .06); ctx.quadraticCurveTo(r * .75, r * .16, r * .99, r * .05); ctx.stroke();
+    dot(r * .55, -r * .14, r * .07, PAL.eyeWhite); dot(r * .56, -r * .14, r * .035, PAL.eyeDark); dot(r * .575, -r * .155, r * .014, PAL.eyeWhite);   // eye + catchlight
+    ctx.restore();
   }
   function drawJelly(c, x, y, r, t) {
     ctx.save(); ctx.globalAlpha = c.alpha; ctx.translate(x, y); ctx.scale(c.turn, c.turnY); ctx.globalCompositeOperation = 'lighter';
-    const p = 1 + Math.sin(t * 1.6 + c.bob) * .12 * M; ctx.fillStyle = glow(r * 1.6, c.k);
-    ctx.beginPath(); ctx.ellipse(0, 0, r * p, r * .8 * p, 0, Math.PI, 0); ctx.fill();
+    const cx = detailOf(c.k) === 'complex';
+    const cp = jellyPulse(c.wig / TAU), sx = 1 - .22 * cp, sy = 1 + .18 * cp;   // contract: narrower + taller (the jet stroke)
+    ctx.fillStyle = glow(r * 1.6, c.k);
+    ctx.beginPath(); ctx.ellipse(0, 0, r * sx, r * .8 * sy, 0, Math.PI, 0); ctx.fill();             // bell
+    if (cx) {
+      ctx.fillStyle = glow(r * .9, c.k); ctx.beginPath(); ctx.ellipse(0, -r * .1 * sy, r * .55 * sx, r * .5 * sy, 0, Math.PI, 0); ctx.fill();   // inner dome
+      ctx.strokeStyle = col(c.k, 14, .55); ctx.lineWidth = 1.4; ctx.lineCap = 'round'; ctx.beginPath();   // scalloped rim (downward frills)
+      const bw = r * sx, seg = 2 * bw / 6; for (let i = 0; i < 6; i++) { const x0 = -bw + seg * i; ctx.moveTo(x0, 0); ctx.quadraticCurveTo(x0 + seg / 2, r * .16, x0 + seg, 0); } ctx.stroke();
+    }
     ctx.strokeStyle = col(c.k, 6, .5); ctx.lineWidth = 1.6; ctx.lineCap = 'round';
-    for (let i = 0; i < 6; i++) { const tx = (i - 2.5) * r * .3; ctx.beginPath(); ctx.moveTo(tx, 0); for (let s = 1; s <= 6; s++) { const f = s / 6; ctx.lineTo(tx + Math.sin(t * 2 * M + i + f * 3) * 5 * f, r * .7 + f * r * 1.5); } ctx.stroke(); }
+    const nT = cx ? 8 : 6, spread = 1 - .12 * cp, ty0 = r * .7 - cp * r * .12;      // tentacles pull in & up on the jet stroke
+    for (let i = 0; i < nT; i++) { const tx = (i - (nT - 1) / 2) * r * (cx ? .24 : .3) * spread, len = r * (cx ? 1.2 + (i % 3) * .45 : 1.5); ctx.beginPath(); ctx.moveTo(tx, 0); for (let s = 1; s <= 6; s++) { const f = s / 6; ctx.lineTo(tx + Math.sin(c.wig + i + f * 3) * 5 * f, ty0 + f * len); } ctx.stroke(); }
+    if (cx) {                                                                                       // frilly oral arms — shorter, thicker, central
+      ctx.strokeStyle = col(c.k, 10, .6); ctx.lineWidth = 2.6;
+      for (let i = 0; i < 4; i++) { const ax = (i - 1.5) * r * .18 * spread; ctx.beginPath(); ctx.moveTo(ax, r * .1); for (let s = 1; s <= 5; s++) { const f = s / 5; ctx.lineTo(ax + Math.sin(c.wig + i * 2 + f * 4) * 6 * f, r * .2 + f * r * .85); } ctx.stroke(); }
+    }
     ctx.restore();
   }
   function drawSquid(c, x, y, r) {
-    begin(c, x, y); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = glow(r * 1.6, c.k);
-    ellipse(r * .15, 0, r * .95, r * .48); tri(r * 1.05, 0, r * .55, -r * .55, r * .55, r * .55);
+    begin(c, x, y); const cx = detailOf(c.k) === 'complex';
+    ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = glow(r * 1.6, c.k);
+    ellipse(r * .15, 0, r * .95, r * .48); tri(r * 1.05, 0, r * .55, -r * .55, r * .55, r * .55);   // mantle + tail fin
     ctx.strokeStyle = col(c.k, 6, .55); ctx.lineWidth = 1.6; ctx.lineCap = 'round';
     for (let i = 0; i < 6; i++) { const dy = (i - 2.5) * r * .16; ctx.beginPath(); ctx.moveTo(-r * .7, dy); for (let s = 1; s <= 5; s++) { const f = s / 5; ctx.lineTo(-r * .7 - f * r * 1.3, dy + Math.sin(c.wig + i + f * 3) * 4 * f); } ctx.stroke(); }
-    ctx.globalCompositeOperation = 'source-over'; dot(r * .25, -r * .16, r * .1, PAL.eyeWhite); dot(r * .27, -r * .16, r * .05, PAL.eyeDark); ctx.restore();
+    if (cx) {                                                       // two long feeding tentacles with paddle clubs
+      ctx.lineWidth = 1.4;
+      for (const sgn of [-1, 1]) { const dy = sgn * r * .1, ex = -r * .7 - r * 2, ey = dy + Math.sin(c.wig + sgn) * r * .18;
+        ctx.beginPath(); ctx.moveTo(-r * .7, dy); ctx.quadraticCurveTo(-r * 1.6, dy + sgn * r * .05, ex, ey); ctx.stroke();
+        ctx.fillStyle = glow(r * .5, c.k); ctx.save(); ctx.translate(ex, ey); ctx.beginPath(); ctx.ellipse(0, 0, r * .18, r * .08, sgn * .3, 0, TAU); ctx.fill(); ctx.restore(); }
+      ctx.fillStyle = glow(r * .6, c.k); ellipse(-r * .3, r * .2, r * .1, r * .18);               // funnel hint
+    }
+    ctx.globalCompositeOperation = 'source-over';
+    if (cx) for (const [sx, sy] of [[0, -.15], [.35, .05], [.62, -.05], [-.1, .12], [.22, .2]]) dot(r * sx, r * sy, r * .06, col(c.k, -22, .4));   // chromatophores
+    dot(r * .25, -r * .16, r * .1, PAL.eyeWhite); dot(r * .27, -r * .16, r * .05, PAL.eyeDark);
+    if (cx) dot(r * .29, -r * .19, r * .025, PAL.eyeWhite);         // catchlight
+    ctx.restore();
   }
   function drawRay(c, x, y, r) {
-    begin(c, x, y); ctx.globalCompositeOperation = 'lighter'; const flap = Math.sin(c.wig) * .5; ctx.fillStyle = glow(r * 1.5, c.k);
-    ctx.beginPath(); ctx.moveTo(r * 1.1, 0); ctx.quadraticCurveTo(0, -r * (1 + flap), -r * .9, -r * .15); ctx.quadraticCurveTo(-r * .4, 0, -r * .9, r * .15); ctx.quadraticCurveTo(0, r * (1 + flap), r * 1.1, 0); ctx.fill();
-    ctx.strokeStyle = col(c.k, 0, .45); ctx.lineWidth = 1.4; ctx.beginPath(); ctx.moveTo(-r * .85, 0); ctx.lineTo(-r * 1.9, Math.sin(c.wig) * r * .3); ctx.stroke();
-    ctx.globalCompositeOperation = 'source-over'; dot(r * .55, -r * .12, r * .07, PAL.eyeWhite); dot(r * .55, r * .12, r * .07, PAL.eyeWhite); ctx.restore();
+    begin(c, x, y); const cx = detailOf(c.k) === 'complex';
+    ctx.globalCompositeOperation = 'lighter'; const flap = Math.sin(c.wig) * .5; ctx.fillStyle = glow(r * 1.5, c.k);
+    ctx.beginPath(); ctx.moveTo(r * 1.1, 0); ctx.quadraticCurveTo(0, -r * (1 + flap), -r * .9, -r * .15); ctx.quadraticCurveTo(-r * .4, 0, -r * .9, r * .15); ctx.quadraticCurveTo(0, r * (1 + flap), r * 1.1, 0); ctx.fill();   // disc
+    if (cx) for (const sgn of [-1, 1]) { ctx.beginPath(); ctx.moveTo(r * 1.1, sgn * r * .06); ctx.quadraticCurveTo(r * 1.46, sgn * r * .1, r * 1.4, sgn * r * .3); ctx.quadraticCurveTo(r * 1.2, sgn * r * .16, r * 1.1, sgn * r * .06); ctx.fill(); }   // cephalic fins (horns)
+    ctx.strokeStyle = col(c.k, 0, .45); ctx.lineWidth = 1.4; ctx.beginPath(); ctx.moveTo(-r * .85, 0); ctx.lineTo(-r * 1.9, Math.sin(c.wig) * r * .3); ctx.stroke();   // tail
+    if (cx) { const tbx = -r * 1.45, tby = Math.sin(c.wig) * r * .22; ctx.fillStyle = col(c.k, -6, .6); tri(tbx, tby - r * .05, tbx - r * .2, tby, tbx, tby + r * .12);   // tail barb
+      ctx.globalCompositeOperation = 'source-over';
+      for (const [sx, sy] of [[.2, -.25], [-.1, .2], [.4, .15], [-.3, -.12]]) dot(r * sx, r * sy, r * .07, col(c.k, 16, .3)); }   // dorsal spots
+    ctx.globalCompositeOperation = 'source-over'; dot(r * .55, -r * .12, r * .07, PAL.eyeWhite); dot(r * .55, r * .12, r * .07, PAL.eyeWhite);
+    if (cx) { dot(r * .56, -r * .12, r * .035, PAL.eyeDark); dot(r * .56, r * .12, r * .035, PAL.eyeDark); }
+    ctx.restore();
   }
   function drawAngler(c, x, y, r, t) {
-    begin(c, x, y); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = glow(r * 1.5, c.k);
+    begin(c, x, y); const cx = detailOf(c.k) === 'complex';
+    ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = glow(r * 1.5, c.k);
     ctx.save(); ctx.rotate(Math.sin(c.wig) * .2); tri(-r * .7, 0, -r * 1.35, -r * .55, -r * 1.35, r * .55); ctx.restore();
     ellipse(-r * .1, 0, r, r * .78);                                   // round deep-sea body
-    ctx.globalCompositeOperation = 'source-over'; ctx.fillStyle = col(c.k, -34, .92);
+    ctx.globalCompositeOperation = 'source-over';
+    if (cx) {                                                          // pectoral fin (behind the jaw layer)
+      ctx.fillStyle = col(c.k, -10, .8); ctx.beginPath(); ctx.moveTo(-r * .2, r * .2); ctx.quadraticCurveTo(-r * .7, r * .42, -r * .5, r * .64); ctx.quadraticCurveTo(-r * .3, r * .46, -r * .2, r * .2); ctx.closePath(); ctx.fill();
+    }
+    ctx.fillStyle = col(c.k, -34, .92);
     ctx.beginPath(); ctx.moveTo(r * .45, -r * .12); ctx.lineTo(r * 1.05, -r * .05); ctx.lineTo(r * 1.05, r * .34); ctx.lineTo(r * .4, r * .42); ctx.closePath(); ctx.fill();   // gaping jaw
     ctx.strokeStyle = 'rgba(230,240,240,0.8)'; ctx.lineWidth = 1;
-    for (let i = 0; i < 4; i++) { const tx = r * (.55 + i * .13); ctx.beginPath(); ctx.moveTo(tx, r * .02); ctx.lineTo(tx + r * .04, r * .17); ctx.stroke(); }
+    for (let i = 0; i < 4; i++) { const tx = r * (.55 + i * .13); ctx.beginPath(); ctx.moveTo(tx, r * .02); ctx.lineTo(tx + r * .04, r * .17); ctx.stroke(); }   // upper fangs
+    if (cx) {
+      for (let i = 0; i < 4; i++) { const tx = r * (.5 + i * .13); ctx.beginPath(); ctx.moveTo(tx, r * .4); ctx.lineTo(tx + r * .04, r * .25); ctx.stroke(); }   // lower fangs
+      ctx.strokeStyle = col(c.k, -22, .7); ctx.lineWidth = Math.max(1, r * .045); ctx.lineCap = 'round';   // dorsal spines
+      for (let i = 0; i < 5; i++) { const sx = -r * .55 + i * r * .2; ctx.beginPath(); ctx.moveTo(sx, -r * .55); ctx.lineTo(sx - r * .05, -r * .82 - (i === 2 ? r * .06 : 0)); ctx.stroke(); }
+      for (const [sx, sy] of [[-.3, -.2], [-.5, .08], [-.1, .28], [-.55, -.12]]) dot(r * sx, r * sy, r * .06, col(c.k, -24, .5));   // pocked skin
+    }
     dot(r * .1, -r * .28, r * .13, PAL.eyeWhite); dot(r * .13, -r * .28, r * .06, PAL.eyeDark);
-    const bx = r * 1.2 + Math.sin(t * 1.5 + c.bob) * r * .12, by = -r * .72 + Math.cos(t * 1.2) * r * .08;   // the lure
+    const lt = WIG_MODE !== 'none' ? t : 0;   // lure bob freezes in rigid mode
+    const bx = r * 1.2 + Math.sin(lt * 1.5 + c.bob) * r * .12, by = -r * .72 + Math.cos(lt * 1.2) * r * .08;   // the lure
     ctx.strokeStyle = col(c.k, 0, .6); ctx.lineWidth = 1.4; ctx.beginPath(); ctx.moveTo(r * .1, -r * .55); ctx.quadraticCurveTo(r * .7, -r * 1.1, bx, by); ctx.stroke();
-    ctx.globalCompositeOperation = 'lighter'; const pulse = .7 + .3 * Math.sin(t * 3 + c.bob);
+    ctx.globalCompositeOperation = 'lighter'; const pulse = .7 + .3 * Math.sin(lt * 3 + c.bob);
     const lg = ctx.createRadialGradient(bx, by, 0, bx, by, r * .6 * pulse);
     lg.addColorStop(0, 'hsla(48,100%,86%,0.95)'); lg.addColorStop(.4, col(c.k, 20, .7)); lg.addColorStop(1, col(c.k, 0, 0));
     ctx.fillStyle = lg; ctx.beginPath(); ctx.arc(bx, by, r * .6 * pulse, 0, TAU); ctx.fill();
     ctx.restore();
   }
   function drawCrab(c, x, y, r) {
-    begin(c, x, y); ctx.globalCompositeOperation = 'source-over';
-    ctx.strokeStyle = col(c.k, -12, .85); ctx.lineWidth = 2; ctx.lineCap = 'round';
-    for (const sgn of [-1, 1]) for (let i = 0; i < 3; i++) { const lx = (i - 1) * r * .5, sw = Math.sin(c.wig + i + (sgn > 0 ? 0 : 1.6)) * r * .12; ctx.beginPath(); ctx.moveTo(lx, 0); ctx.lineTo(lx + sgn * r * .5, r * .5 + sw); ctx.stroke(); }
+    begin(c, x, y); const cx = detailOf(c.k) === 'complex'; ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = col(c.k, -12, .85); ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    for (const sgn of [-1, 1]) for (let i = 0; i < 3; i++) {
+      const lx = (i - 1) * r * .5, sw = Math.sin(c.wig + i + (sgn > 0 ? 0 : 1.6)) * r * .12;
+      if (cx) { ctx.beginPath(); ctx.moveTo(lx, 0); ctx.lineTo(lx + sgn * r * .42, r * .32 + sw * .6); ctx.lineTo(lx + sgn * r * .6, r * .62 + sw); ctx.stroke(); }   // knee-jointed legs
+      else { ctx.beginPath(); ctx.moveTo(lx, 0); ctx.lineTo(lx + sgn * r * .5, r * .5 + sw); ctx.stroke(); }
+    }
     ctx.strokeStyle = col(c.k, -4, .9);
-    for (const sgn of [-1, 1]) { ctx.beginPath(); ctx.moveTo(sgn * r * .7, -r * .1); ctx.lineTo(sgn * r * 1.2, -r * .5 + Math.sin(c.wig) * r * .08); ctx.stroke(); }
-    ctx.fillStyle = glow(r * 1.2, c.k); ellipse(0, 0, r, r * .7);
+    for (const sgn of [-1, 1]) {
+      const ex = sgn * r * 1.2, ey = -r * .5 + Math.sin(c.wig) * r * .08;
+      ctx.beginPath(); ctx.moveTo(sgn * r * .7, -r * .1); ctx.lineTo(ex, ey); ctx.stroke();       // arm
+      if (cx) { const gap = Math.abs(Math.sin(c.wig * 2 + (sgn > 0 ? 0 : 1))) * r * .12 + r * .04; ctx.fillStyle = col(c.k, -2, .95);   // pincer opens/closes
+        ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(ex + sgn * r * .3, ey - r * .05 - gap); ctx.lineTo(ex + sgn * r * .16, ey - gap * .2); ctx.closePath(); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(ex + sgn * r * .28, ey + r * .1 + gap * .3); ctx.lineTo(ex + sgn * r * .15, ey + gap * .2); ctx.closePath(); ctx.fill(); }
+    }
+    const cg = ctx.createRadialGradient(0, -r * .1, 0, 0, -r * .1, r);                             // opaque shaded shell (symmetric)
+    cg.addColorStop(0, col(c.k, 2, 1)); cg.addColorStop(.55, col(c.k, -16, 1)); cg.addColorStop(1, col(c.k, -32, 1));   // darker toward the rim
+    ctx.fillStyle = cg; ellipse(0, 0, r, r * .7);
+    ctx.fillStyle = col(c.k, 12, .35); ellipse(0, -r * .24, r * .34, r * .16);                     // top-centre sheen
     ctx.globalCompositeOperation = 'source-over';
-    for (const sgn of [-1, 1]) { ctx.strokeStyle = col(c.k, -8, .8); ctx.beginPath(); ctx.moveTo(sgn * r * .25, -r * .45); ctx.lineTo(sgn * r * .3, -r * .8); ctx.stroke(); dot(sgn * r * .3, -r * .8, r * .1, PAL.eyeWhite); dot(sgn * r * .3, -r * .8, r * .05, PAL.eyeDark); }
+    for (const [sx, sy] of [[.12, -.3], [.32, -.12], [.5, .05], [.22, .18], [.06, .06], [.4, .26], [.14, .32], [0, -.14]]) {   // speckles (symmetric so dir-flip stays invisible)
+      dot(r * sx, r * sy, r * .035, col(c.k, -26, .55)); if (sx > 0) dot(-r * sx, r * sy, r * .035, col(c.k, -26, .55));
+    }
+    if (cx) {                                                                                      // shell ridges, mandibles
+      ctx.strokeStyle = col(c.k, -20, .5); ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(-r * .5, -r * .12); ctx.quadraticCurveTo(0, -r * .5, r * .5, -r * .12); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-r * .34, -r * .02); ctx.quadraticCurveTo(0, -r * .32, r * .34, -r * .02); ctx.stroke();
+      ctx.strokeStyle = col(c.k, -16, .7); ctx.lineWidth = 1.6;
+      for (const sgn of [-1, 1]) { ctx.beginPath(); ctx.moveTo(sgn * r * .06, r * .46); ctx.lineTo(sgn * r * .12, r * .64); ctx.stroke(); }   // mandibles
+    }
+    for (const sgn of [-1, 1]) { ctx.strokeStyle = col(c.k, -8, .8); ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(sgn * r * .25, -r * .45); ctx.lineTo(sgn * r * .3, -r * .8); ctx.stroke(); dot(sgn * r * .3, -r * .8, r * .1, PAL.eyeWhite); dot(sgn * r * .3, -r * .8, r * .05, PAL.eyeDark); }
     ctx.restore();
   }
   function label(text, x, y, hov) {
@@ -279,17 +473,42 @@
     if (swx <= .015) { for (const s of streaks) s.trail.length = 0; return; }
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     const turb = 1.1 + env.wi * 5.5, spd = (24 + env.wind * .8) * M;   // turning strength & speed grow with load
+    const FZONE = 50, LIFT = 5, DIP = 60;                              // force field: within FZONE px of the sea, steer up only; may dip DIP px behind it
     for (const s of streaks) {
       s.phase += dt;
-      const omega = turb * (Math.sin(s.phase * s.w1 + s.ph) * s.a1 + Math.sin(s.phase * s.w2 - s.ph2) * s.a2) - 0.9 * Math.sin(s.th);
+      let omega = turb * (Math.sin(s.phase * s.w1 + s.ph) * s.a1 + Math.sin(s.phase * s.w2 - s.ph2) * s.a2) - 0.9 * Math.sin(s.th);
+      const gap = waterY - s.hy;                                       // px above the sea (negative = behind it)
+      if (gap < FZONE) {                                               // near/under the surface: only upward heading changes
+        const up = -Math.sign(Math.cos(s.th) || 1);                   // the omega sign that lifts the heading (turns it toward up)
+        if (Math.sign(omega) !== up) omega = 0;                        // forbid downward turns in the zone
+        omega += up * (1 - gap / FZONE) * LIFT;                        // active lift, stronger the closer/deeper it is
+      }
       s.th += omega * dt;                                              // integrate heading -> curls, and loops at high load
       s.hx += Math.cos(s.th) * spd * s.sp * dt; s.hy += Math.sin(s.th) * spd * s.sp * dt;
-      s.hy = clamp(s.hy, H * .015, waterY - 8);
+      s.hy = clamp(s.hy, H * .015, waterY + DIP);                      // may dip behind the sea (water is drawn over it), then lifted back
       if (s.hx > W + 40 || s.hx < -90) { s.hx = -30; s.hy = (.05 + rand() * .22) * H; s.th = (rand() - .5) * .5; s.trail.length = 0; }
       s.trail.push(s.hx, s.hy);
-      const maxpts = 44 * 2; if (s.trail.length > maxpts) s.trail.splice(0, s.trail.length - maxpts);
+      const maxpts = WIND_LEN * 2; if (s.trail.length > maxpts) s.trail.splice(0, s.trail.length - maxpts);
       const n = s.trail.length / 2;
-      for (let i = 1; i < n; i++) { const f = i / (n - 1 || 1); ctx.strokeStyle = PAL.wind(swx * f); ctx.lineWidth = .5 + f * 1.5; ctx.beginPath(); ctx.moveTo(s.trail[(i - 1) * 2], s.trail[(i - 1) * 2 + 1]); ctx.lineTo(s.trail[i * 2], s.trail[i * 2 + 1]); ctx.stroke(); }
+      const alpha = f => swx * (WIND_A0 + (WIND_A1 - WIND_A0) * f);   // fade remapped to [min,max] (×wind); no invisible tail when min>0
+      if (WIND_TIERS >= 1) {
+        // bucket the fade into WIND_TIERS opacity/width tiers; fi is monotonic along the
+        // trail, so each tier is a contiguous run -> one stroke per tier (N strokes, not ~44).
+        let cur = -1;
+        for (let i = 1; i < n; i++) {
+          const fi = i / (n - 1 || 1), tier = Math.min(WIND_TIERS - 1, Math.floor(fi * WIND_TIERS));
+          if (tier !== cur) {
+            if (cur >= 0) ctx.stroke();
+            const f = (tier + .5) / WIND_TIERS;
+            ctx.strokeStyle = PAL.wind(alpha(f)); ctx.lineWidth = .5 + f * 1.5;
+            ctx.beginPath(); ctx.moveTo(s.trail[(i - 1) * 2], s.trail[(i - 1) * 2 + 1]); cur = tier;
+          }
+          ctx.lineTo(s.trail[i * 2], s.trail[i * 2 + 1]);
+        }
+        if (cur >= 0) ctx.stroke();
+      } else {
+        for (let i = 1; i < n; i++) { const f = i / (n - 1 || 1); ctx.strokeStyle = PAL.wind(alpha(f)); ctx.lineWidth = .5 + f * 1.5; ctx.beginPath(); ctx.moveTo(s.trail[(i - 1) * 2], s.trail[(i - 1) * 2 + 1]); ctx.lineTo(s.trail[i * 2], s.trail[i * 2 + 1]); ctx.stroke(); }
+      }
     }
   }
 
@@ -318,15 +537,17 @@
       ctx.fillStyle = g; ctx.fillRect(sx - r * 6, sy - r * 6, r * 12, r * 12);
       ctx.fillStyle = `rgb(255,${Math.round(240 - warm * 44)},${Math.round(200 - warm * 92)})`; ellipse(sx, sy, r * 1.1, r * 1.1);
     }
-    drawStreaks(dt, t);
+    if (!OFF.has('streaks')) drawStreaks(dt, t);
     const cloudRGB = mixRGB(CLOUD_N, CLOUD_D, df);
     const overcast = clamp((env.wi - .5) * 1.3, 0, .55);           // heavy load -> overcast backdrop
+    if (!OFF.has('clouds')) {
     if (overcast > .01) for (const b of backClouds) { b.x += env.wind * b.v / W * .006 * M; if (b.x > 1.45) b.x = -.45; const cx = b.x * W, cy = b.y * H, s = b.s * (1 + env.wi * .3); ctx.fillStyle = `rgba(${cloudRGB},${overcast * .5})`; for (const [dx, dy, rr] of CLOUD_PUFFS) ellipse(cx + dx * 60 * s, cy + dy * 60 * s, 54 * s * rr, 34 * s * rr); }
     clouds.forEach((c, i) => {
       c.a += ((i < env.cloudCount ? 1 : 0) - c.a) * CFG.weather.fade;
       c.x += env.wind * c.v / W * .012 * M; if (c.x > 1.28) c.x = -.25;
       if (c.a > .02) { const cx = c.x * W, cy = c.y * H, s = env.cloudSize * c.s; ctx.fillStyle = `rgba(${cloudRGB},${.5 * c.a})`; for (const [dx, dy, rr] of CLOUD_PUFFS) ellipse(cx + dx * 46 * s, cy + dy * 46 * s, 40 * s * rr, 26 * s * rr); }
     });
+    }
     // swap pressure -> lightning
     const swi = clamp((S.swapPct - CFG.swap.boltFloor) / (100 - CFG.swap.boltFloor), 0, 1);
     if (swi > 0 && !reduce && rand() < .003 + swi * .035) { lightning = 1; bolt = makeBolt(); }
@@ -358,7 +579,14 @@
     let g = ctx.createLinearGradient(0, waterY, 0, H); g.addColorStop(0, mix(WATER_N[0], WATER_D[0], env.sunH)); g.addColorStop(.5, mix(WATER_N[1], WATER_D[1], env.sunH)); g.addColorStop(1, mix(WATER_N[2], WATER_D[2], env.sunH));   // water lightens toward day
     ctx.fillStyle = g; ctx.fill(surf);
     ctx.save(); ctx.clip(surf); ctx.globalCompositeOperation = 'lighter';
-    for (let i = 0; i < 5; i++) { const rx = ((i / 5 + t * .01 * M) % 1) * W; g = ctx.createLinearGradient(rx, waterY, rx + 60, H * .7); g.addColorStop(0, PAL.god(.05)); g.addColorStop(1, PAL.god(0)); ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(rx, waterY); ctx.lineTo(rx + 40, waterY); ctx.lineTo(rx + 120, H * .75); ctx.lineTo(rx + 10, H * .75); ctx.fill(); }
+    // god rays converge on whichever light is brighter (a shaft comes from one source, not a blend):
+    // sun brightness ∝ sunH; the moon dims to ~0.22 by day. Aim each ray so, traced up, it hits it.
+    const df = env.sunH, botY = H * .75, depth = botY - waterY;
+    const sunLit = df > 1 - df * .78;                                                    // sun outshines the day-dimmed moon
+    const srcX = sunLit ? W * (1 - CFG.moon.xF) : W * CFG.moon.xF;                        // the brighter light's position
+    const srcY = sunLit ? lerp(waterY, H * CFG.moon.yF, df) : H * CFG.moon.yF;
+    const gap = Math.max(H * .08, waterY - srcY);                                        // surface→light drop (clamped off the horizon)
+    for (let i = 0; i < 5; i++) { const cx = ((i / 5 + t * .01 * M) % 1) * W, lean = Math.tan(clamp(Math.atan2(cx - srcX, gap), -1.05, 1.05)) * depth; g = ctx.createLinearGradient(cx, waterY, cx + lean, botY); g.addColorStop(0, PAL.god(.05)); g.addColorStop(1, PAL.god(0)); ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(cx - 20, waterY); ctx.lineTo(cx + 20, waterY); ctx.lineTo(cx + lean + 55, botY); ctx.lineTo(cx + lean - 55, botY); ctx.fill(); }
     for (const pk of plankton) { const px = ((pk.x + t * pk.sp * .006 * M) % 1) * W, py = waterY + pk.y * (H - waterY) + Math.sin(t + pk.ph) * 6 * M; dot(px, py, 1, PAL.plankton(.12 + .1 * Math.sin(t * 2 + pk.ph))); }
     ctx.restore();
   }
@@ -392,47 +620,83 @@
   }
 
   /* ======================= loop ======================= */
-  let last = performance.now(), clock = 0;
+  let last = performance.now(), clock = 0, fpsN = 0;
+  // Pick one whale (if any is present and not already spyhopping) to start a spyhop, and set the
+  // next due time. If none is available, retry after a short delay rather than skipping the period.
+  function triggerSpyhop() {
+    const whales = [];
+    for (const c of creatures.values()) if (c.k.shape === 'whale' && c.state === 'in' && !c.spy) whales.push(c);
+    if (!whales.length) { nextSpyhop = clock + SPY.retry; return; }
+    const c = whales[(rand() * whales.length) | 0];
+    c.spy = 1; c.spyT = 0; c.spyWig = c.wig; c.spyLiftPrev = 0;   // continue the fluke phase from where it was
+    nextSpyhop = clock + SPY.period;
+  }
+
   function frame(now) {
-    const dt = Math.min(.05, (now - last) / 1000); last = now; clock += dt;
+    if (!(SHOT && clock >= SHOT)) requestAnimationFrame(frame);     // ?shot=N: stop scheduling after N s so the frame freezes for capture
+    const elapsed = (now - last) / 1000;
+    if (FRAME_MIN && elapsed < FRAME_MIN) return;                  // wallpaper fps cap: skip until enough time has passed
+    fpsN++;                                                        // counts only frames we actually draw
+    const dt = Math.min(.05, elapsed); last = now; clock += dt;
+    if (clock >= nextSpyhop) triggerSpyhop();
+    if (BENCH && DAYNIGHT) { const tv = 30 + 62 * (.5 - .5 * Math.cos(clock * .16)); S.temp = S.tempMean = tv; }   // ~40s sun<->moon cycle
     env.stormA += (env.stormAT - env.stormA) * CFG.ease.storm;
 
-    drawSky(clock, dt); drawWater(clock); drawBed(clock); drawBubbles(dt, clock);
+    if (!OFF.has('sky')) drawSky(clock, dt);
+    if (!OFF.has('water')) drawWater(clock);
+    if (!OFF.has('bed')) drawBed(clock);
+    if (!OFF.has('bubbles')) drawBubbles(dt, clock);
 
     // pass 1 — advance creatures
     for (const [name, c] of creatures) {
-      if (c.state !== 'leaving' && Date.now() - c.lastSeen > CFG.keepAliveMs) c.state = 'leaving';
+      if (!BENCH && c.state !== 'leaving' && Date.now() - c.lastSeen > CFG.keepAliveMs) c.state = 'leaving';   // bench seeds once; never expire its fixed roster
       if (c.state === 'entering') { c.arrive += dt / CFG.arriveSec; if (c.arrive >= 1) { c.arrive = 1; c.state = 'in'; } }
       else if (c.state === 'leaving') { c.arrive -= dt / CFG.leaveSec; if (c.arrive <= 0) { creatures.delete(name); continue; } }
-      c.r += (c.rT - c.r) * CFG.ease.r; c.cpu += (c.cpuT - c.cpu) * CFG.ease.cpu;
+      c.r += (c.rT - c.r) * CFG.ease.r; c.cpu += (c.cpuT - c.cpu) * CFG.ease.cpu; c.cpuSlow += (c.cpuT - c.cpuSlow) * CFG.ease.cpuSlow;
       const arrE = easeOut(c.arrive);
-      c.act = clamp(c.cpu / CFG.speed.cpuRef, 0, 1);
+      c.act = clamp(c.cpu / CFG.speed.cpuRef, 0, 1);                          // momentary → wiggle
+      const actSlow = clamp(c.cpuSlow / CFG.speed.cpuRef, 0, 1);              // integrated → speed
       c.rDraw = c.r * lerp(CFG.far.scale, 1, arrE); c.turn = lerp(CFG.far.turn, 1, arrE); c.turnY = lerp(CFG.far.yscale, 1, arrE); c.alpha = lerp(CFG.far.alpha, 1, arrE);
-      c.wig = c.t * (CFG.wiggle.base + c.k.spd * 4 + c.act * CFG.wiggle.cpu);
-      c.boost *= CFG.crab.decay;
+      const sizeSlow = clamp(CFG.wiggle.sizeRef / c.rDraw, CFG.wiggle.sizeMin, 1);   // big creatures beat fins slower
+      c.wig = WIG_MODE !== 'none' ? c.t * (c.k.shape === 'jelly' ? TAU * CFG.bob.jellyRate : CFG.wiggle.base + c.k.spd * 4 + c.act * CFG.wiggle.cpu) * sizeSlow : 0;   // 'none' = rigid
+      c.boost *= CFG.crab.decay; c.dirLock -= dt;
+      let lift = 0;                                                               // 0 = swimming normally; 0→1→0 over a spyhop
+      if (c.spy) {
+        c.spyT += dt; const u = c.spyT / SPY.dur;
+        if (u >= 1) { c.spy = 0; c.spyT = 0; c.spyRot = 0; }
+        else {
+          lift = spyLift(u); c.spyRot = -Math.PI / 2 * SPY.tilt * lift;
+          const spyVel = (lift - c.spyLiftPrev) / Math.max(dt, 1e-4); c.spyLiftPrev = lift;   // wiggle by climb, not cpu
+          const spyWigRate = (spyVel > 0 ? SPY.riseWig : SPY.fallWig) * Math.abs(spyVel);
+          if (WIG_MODE !== 'none') { c.spyWig += spyWigRate * sizeSlow * dt; c.wig = c.spyWig; }
+        }
+      }
       const edgeB = 1 + CFG.edge.boost * clamp(1 - Math.min(Math.abs(c.x), Math.abs(W - c.x)) / CFG.edge.zone, 0, 1);
-      let base = (CFG.speed.floor + (CFG.speed.ceil - CFG.speed.floor) * c.act) * c.k.spd;
+      let base = (CFG.speed.floor + (CFG.speed.ceil - CFG.speed.floor) * actSlow) * c.k.spd;   // accelerate toward the CPU-set ceiling over seconds
       if (c.k.shape === 'crab') base = Math.max(base, CFG.crab.crawl);            // steady crawl so crabs traverse & wrap
-      const spd = base * c.person * arrE * edgeB * (1 + c.boost);
+      const spd = base * c.person * arrE * edgeB * (1 + c.boost) * (1 - SPY.slow * lift);   // near-stationary while spyhopping
       c.t += dt; c.x += c.dir * spd * dt * M;
       const marg = c.rDraw + 8; if (c.x > W + marg) c.x = -marg; else if (c.x < -marg) c.x = W + marg;   // wrap as soon as fully offscreen, so they re-enter promptly
       const baseY = waterY + c.frac * (bedY - waterY);
-      if (c.k.shape === 'jelly') c.swimY = baseY + Math.sin(c.t * .5) * CFG.bob.jellyDrift * M;
-      else if (c.k.shape === 'crab') c.swimY = bedY - c.rDraw * .35;
+      if (c.k.shape === 'jelly') c.swimY = baseY + (.45 - jellyPulse(c.wig / TAU)) * CFG.bob.jellyDrift * M;   // jet up on contraction, drift down between
+      else if (c.k.shape === 'crab') c.swimY = bedY + 22 - c.rDraw * .7;   // bottom edge at the seafloor trough
       else { const amp = (c.k.shape === 'school' ? CFG.bob.school : CFG.bob.fish) * M * (1 + c.act * CFG.bob.cpuBoost); c.swimY = baseY + Math.sin(c.t * .7 + c.bob) * amp; }
+      if (lift > 0) c.swimY += (waterY - c.rDraw * .12 - c.swimY) * lift;   // ease up from the normal bob toward a surface breach and back
       c.avoidY *= CFG.ease.avoidDecay; c.labelOff.x *= CFG.label.decay; c.labelOff.y *= CFG.label.decay;
       c.labelName = c.k.shape === 'school' ? `${c.name} ×${c.count}` : c.name;
       c.labelHW = c.labelName.length * CFG.label.charW / 2;
     }
 
-    const arr = [...creatures.values()];
+    // Stable paint order by resting depth (band) so overlapping creatures never swap who's on top;
+    // deeper band draws later = in front. frac is a fixed per-creature random, so the order is steady.
+    const arr = [...creatures.values()].sort((a, b) => (a.frac - b.frac) || (a.name < b.name ? -1 : 1));
     // pass 2 — body avoidance (crabs push harder)
     for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) {
       const a = arr[i], b = arr[j], ay = a.swimY + a.avoidY, by = b.swimY + b.avoidY;
       const dx = b.x - a.x, dy = by - ay, d = Math.hypot(dx, dy), min = (a.rDraw + b.rDraw) * CFG.avoid.gap;
       if (a.k.shape === 'crab' && b.k.shape === 'crab' && d < min * CFG.crab.near && d > .01) {
         const big = a.rDraw >= b.rDraw ? a : b, small = big === a ? b : a;   // larger crab scoots clear rather than shoving
-        big.boost = CFG.crab.boost; big.dir = big.x >= small.x ? 1 : -1;
+        big.boost = CFG.crab.boost; if (big.dirLock <= 0) { big.dir = big.x >= small.x ? 1 : -1; big.dirLock = CFG.crab.dirLock; }   // commit, don't jitter
       }
       if (d < min && d > .01) {
         const p = (min - d) / min * CFG.avoid.push * dt;
@@ -459,6 +723,7 @@
     let hov = null, hd = 46;
     for (const c of arr) { const d = Math.hypot(c.x - mouse.x, (c.swimY + c.avoidY) - mouse.y); if (d < c.rDraw + 16 && d < hd) { hd = d; hov = c; } }
     for (const c of arr) {
+      if (OFF.has('creatures')) break;
       const y = c.swimY + c.avoidY, r = c.rDraw, k = c.k.shape;
       if (k === 'jelly') drawJelly(c, c.x, y, r, clock);
       else if (k === 'whale') drawWhale(c, c.x, y, r);
@@ -466,14 +731,13 @@
       else if (k === 'ray') drawRay(c, c.x, y, r);
       else if (k === 'angler') drawAngler(c, c.x, y, r, clock);
       else if (k === 'crab') drawCrab(c, c.x, y, r);
-      else if (k === 'school') { for (const o of c.off) drawFish(c, c.x + o.dx + Math.sin(c.t * 2 + o.ph) * 8, y + o.dy + Math.cos(c.t * 2 + o.ph) * 8, r * CFG.radius.schoolFish); }
-      else drawFish(c, c.x, y, r);
+      else if (k === 'school') { const fn = SPRITE_PHASES ? blitFish : drawFish; for (const o of c.off) fn(c, c.x + o.dx + Math.sin(c.t * 2 + o.ph) * 8, y + o.dy + Math.cos(c.t * 2 + o.ph) * 8, r * CFG.radius.schoolFish); }
+      else (SPRITE_PHASES ? blitFish : drawFish)(c, c.x, y, r);
       ctx.globalAlpha = 1;
       if (showLabels || hov === c) label(hov === c ? `${c.labelName} · ${c.mem} MiB` : c.labelName, c.x + c.labelOff.x, y - r - (k === 'whale' ? r * .5 : 8) + c.labelOff.y, hov === c);
     }
     ctx.globalAlpha = 1;
-    drawSurface(clock);
-    requestAnimationFrame(frame);
+    if (!OFF.has('surface')) drawSurface(clock);
   }
 
   /* ======================= polling ======================= */
@@ -511,19 +775,37 @@
 
   /* ======================= boot ======================= */
   function resize() {
-    DPR = Math.min(2, devicePixelRatio || 1); W = innerWidth; H = innerHeight;
+    DPR = DPR_CAP > 0 ? Math.min(DPR_CAP, devicePixelRatio || 1) : (devicePixelRatio || 1); W = innerWidth; H = innerHeight;   // dpr 0 = native
     cv.width = W * DPR; cv.height = H * DPR; cv.style.width = W + 'px'; cv.style.height = H + 'px';
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     waterY = H * CFG.waterLevelF; bedY = H * CFG.bedFrac;
+    _sprites.clear(); _spriteBytes = 0;   // sprites are baked at DPR; rebuild on size change
   }
   addEventListener('resize', resize);
   addEventListener('mousemove', e => { mouse.x = e.clientX; mouse.y = e.clientY; });
   addEventListener('mouseleave', () => { mouse.x = mouse.y = -999; });
   document.getElementById('lbl').addEventListener('click', e => { showLabels = !showLabels; e.currentTarget.textContent = 'labels: ' + (showLabels ? 'on' : 'off'); });
+  // Browsers throttle rAF while the page is hidden; reset the clock on return so dt doesn't lurch.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) last = performance.now(); });
+  // ?debug=1 → small readout so we can confirm the actual fps / DPR the wallpaper is running at.
+  if (DEBUG) {
+    const dbg = document.createElement('div');
+    dbg.style.cssText = 'position:fixed;right:12px;bottom:44px;z-index:9;font:700 13px ui-monospace,Menlo,monospace;color:#7df9ff;background:rgba(0,0,0,.6);padding:6px 10px;border-radius:8px;pointer-events:none';
+    document.body.appendChild(dbg);
+    let t0 = performance.now();
+    setInterval(() => {
+      const now = performance.now(), fps = Math.round(fpsN * 1000 / (now - t0));
+      fpsN = 0; t0 = now;
+      dbg.textContent = `${FPS_CAP ? 'wallpaper' : 'browser'} · ${fps}fps · dpr${DPR} · ${W}×${H}` + (SPRITE_PHASES ? ` · ${_sprites.size} sprites ${(_spriteBytes / 1e6).toFixed(1)}MB` : '');
+    }, 1000);
+  }
 
   (async () => {
-    await loadKinds();                                   // fetch creature rules before first paint
-    resize(); poll(); setInterval(poll, CFG.pollMs); requestAnimationFrame(frame);
+    await loadConfig();                                  // fetch creature rules + render settings before first paint
+    resize();
+    if (BENCH) applyState(BENCH_STATE);                  // fixed workload: seed once, never poll
+    else { poll(); setInterval(poll, CFG.pollMs); }
+    requestAnimationFrame(frame);
   })();
 })();
 </script>

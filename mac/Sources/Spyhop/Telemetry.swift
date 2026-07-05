@@ -15,27 +15,34 @@ struct CreatureConfig: Decodable {
     let band: [Double]          // [lo, hi] vertical swim band as fractions of height
     let mul: Double?            // size multiplier (default 1)
     let always: Bool?           // server-side roster pin; client stores but never reads it
+    let detail: String?         // "simple" | "complex" — overrides render.creatureDetail for this creature
 }
 
 /// The render block. Only `fps`, `wiggle`, and the `wind*` knobs are honored natively;
 /// `dpr`/`spritePhases` are Canvas2D-specific and ignored (SpriteKit textures everything).
 struct RenderConfig: Decodable {
     var fps: Int = 30
-    var wiggle: Bool = true
+    var wiggleMode = "high"   // "none" | "low" | "high"; JSON key `wiggle` (accepts legacy bool)
     var windTiers: Int = 0
     var windLength: Int = 44
     var windAlphaMin: Double = 0
     var windAlphaMax: Double = 1
+    var creatureDetail = "complex"   // global default body detail: "simple" | "complex"
 
-    enum CodingKeys: String, CodingKey { case fps, wiggle, windTiers, windLength, windAlphaMin, windAlphaMax }
+    enum CodingKeys: String, CodingKey { case fps, wiggle, windTiers, windLength, windAlphaMin, windAlphaMax, creatureDetail }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         if let v = try c.decodeIfPresent(Int.self, forKey: .fps) { fps = v }
-        if let v = try c.decodeIfPresent(Bool.self, forKey: .wiggle) { wiggle = v }
+        if let s = try? c.decode(String.self, forKey: .wiggle) {
+            wiggleMode = s.lowercased() == "none" ? "none" : "high"
+        } else if let b = try? c.decode(Bool.self, forKey: .wiggle) {
+            wiggleMode = b ? "high" : "none"
+        }
         if let v = try c.decodeIfPresent(Int.self, forKey: .windTiers) { windTiers = v }
         if let v = try c.decodeIfPresent(Int.self, forKey: .windLength) { windLength = v }
         if let v = try c.decodeIfPresent(Double.self, forKey: .windAlphaMin) { windAlphaMin = v }
         if let v = try c.decodeIfPresent(Double.self, forKey: .windAlphaMax) { windAlphaMax = v }
+        if let v = try c.decodeIfPresent(String.self, forKey: .creatureDetail) { creatureDetail = v == "simple" ? "simple" : "complex" }
     }
     init() {}
 }
@@ -108,6 +115,9 @@ final class Telemetry {
     private let session = URLSession(configuration: .ephemeral)
     private var pollTimer: Timer?
     private var configLoaded = false
+    private var pollInterval: TimeInterval = 4
+    private var started = false   // live mode (start() called); false in bench
+    private var active = true     // false while the wallpaper is fully occluded
 
     init(baseURL: URL) { self.baseURL = baseURL }
 
@@ -115,20 +125,34 @@ final class Telemetry {
         // Try config (creature mapping) BEFORE the first state poll, then begin polling. The
         // very first LAN request can fail on a cold `open` launch, so keep retrying config each
         // poll until it lands; setConfig re-maps creatures that spawned as the fish fallback.
+        self.pollInterval = pollInterval; started = true
         loadConfig { [weak self] in
-            guard let self else { return }
+            guard let self, self.active else { return }
             self.pollState()
-            self.pollTimer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
-                Task { @MainActor in
-                    guard let self else { return }
-                    if !self.configLoaded { self.loadConfig() }
-                    self.pollState()
-                }
+            self.schedulePolling()
+        }
+    }
+
+    private func schedulePolling() {
+        pollTimer?.invalidate()
+        pollTimer = Timer.scheduledTimer(withTimeInterval: pollInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if !self.configLoaded { self.loadConfig() }
+                self.pollState()
             }
         }
     }
 
     func stop() { pollTimer?.invalidate(); pollTimer = nil }
+
+    /// Suspend polling while the wallpaper is fully occluded (nobody can see the telemetry anyway),
+    /// and resume with an immediate refresh when it's exposed again. No-op in bench mode.
+    func setActive(_ on: Bool) {
+        guard started, on != active else { return }
+        active = on
+        if on { pollState(); schedulePolling() } else { stop() }
+    }
 
     /// Config fetch. `done` fires on the main queue after the response (or failure).
     func loadConfig(_ done: (() -> Void)? = nil) {

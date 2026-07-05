@@ -5,10 +5,17 @@
     { "match": "postgres|postgresql", "shape": "crab",  "hue": 210, "always": true },
     { "match": "nginx",               "shape": "ray",   "hue": 130 },
     { "match": "ollama|llama",        "shape": "whale",  "always": true },
-    { "match": "my-service",          "shape": "school", "hue": 285, "spd": 0.9 }
+    { "match": "my-service",          "shape": "school", "hue": 285, "spd": 0.9, "detail": "simple" }
   ],
 
   "muteAlerts": [
     "inbound_packets_dropped"
-  ]
+  ],
+
+  "render": {
+    "fps": 30,
+    "dpr": 0,
+    "wiggle": "high",
+    "creatureDetail": "complex"
+  }
 }

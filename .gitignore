@@ -5,3 +5,6 @@ spyhop.config.json
 __pycache__/
 *.pyc
 *.log
+bench.conf
+*.png
+bench-results.json

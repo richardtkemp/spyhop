@@ -128,7 +128,9 @@ final class OceanScene: SKScene {
         if waterShape.parent == nil { addChild(waterShape) }
 
         // sky extends DOWN past the mean surface so troughs reveal sky, not background
-        let sky = SKSpriteNode(texture: gradientTexture(skyStops, size: CGSize(width: W, height: H - surfaceY + margin)))
+        let skyH = H - surfaceY + margin
+        let sky = SKSpriteNode(texture: gradientTexture(skyStops, size: CGSize(width: W, height: skyH)))
+        sky.size = CGSize(width: W, height: skyH)   // texture is a narrow strip; stretch it to full width
         sky.anchorPoint = CGPoint(x: 0.5, y: 0)
         sky.position = CGPoint(x: W / 2, y: surfaceY - margin)
         sky.zPosition = -11
@@ -152,7 +154,9 @@ final class OceanScene: SKScene {
     }
 
     private func gradientTexture(_ colors: [NSColor], size: CGSize) -> SKTexture {
-        let w = max(1, Int(size.width)), h = max(1, Int(size.height))
+        // The gradient is purely vertical, so a narrow strip carries all the information — the node
+        // stretches it to full width. Storing full width would be W× the bytes for no visible gain.
+        let w = 8, h = max(1, Int(size.height))
         let cs = CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
                                   space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
@@ -175,6 +179,10 @@ final class OceanScene: SKScene {
     }
     func applyState(_ st: State) { sim.applyState(st, now: ProcessInfo.processInfo.systemUptime) }
 
+    /// Drop the per-node texture keys so every creature re-requests its texture next frame
+    /// (used after the atlas frame count changes and the bake cache was flushed).
+    func invalidateTextures() { nodeKey.removeAll() }
+
     // MARK: frame
 
     override func update(_ currentTime: TimeInterval) {
@@ -190,7 +198,7 @@ final class OceanScene: SKScene {
         updateHUD()
         syncCreatures()
         seabed.update(clock: sim.clock, wind: sim.env.wind, rockCount: sim.env.rockCount, uptimeDays: uptimeDays(sim.uptime))
-        waterFX.update(dt: dt, clock: sim.clock, wind: sim.env.wind, waveAmp: sim.env.waveAmp, wi: sim.env.wi, motionScale: sim.motionScale)
+        waterFX.update(dt: dt, clock: sim.clock, wind: sim.env.wind, waveAmp: sim.env.waveAmp, wi: sim.env.wi, motionScale: sim.motionScale, sunH: sim.env.sunH)
         celestial.update(sunH: sim.env.sunH, clock: sim.clock)
         if !off.contains("clouds") {
             clouds.update(sunH: sim.env.sunH, wind: sim.env.wind, cloudCount: sim.env.cloudCount,
@@ -213,15 +221,18 @@ final class OceanScene: SKScene {
             } else {
                 let node = nodes[c.name] ?? makeNode(for: c)
                 let phase = wigPhase(c)
-                let key = "\(c.k.shape.rawValue)\(phase)"
-                if nodeKey[c.name] != key {   // shape or wiggle phase changed → swap the (cached) texture
-                    node.texture = ShapeBaker.texture(c.k.shape, c.k, phase: phase, scale: view?.window?.backingScaleFactor ?? 2)
+                let bkt = ShapeBaker.sizeBucket(CGFloat(c.rT))   // bake sharpness follows the creature's target size
+                let key = "\(c.k.shape.rawValue)\(phase)|\(c.k.detail)|\(Int(bkt))"
+                if nodeKey[c.name] != key {   // shape, wiggle phase, or size bucket changed → swap the (cached) texture
+                    node.texture = ShapeBaker.texture(c.k.shape, c.k, phase: phase, sizeR: CGFloat(c.rT), scale: view?.window?.backingScaleFactor ?? 2)
                     nodeKey[c.name] = key
                 }
                 let s = CGFloat(c.rDraw) / refR
                 node.position = CGPoint(x: CGFloat(c.x), y: CGFloat(sim.H - (c.swimY + c.avoidY)))
                 node.xScale = s * CGFloat(c.dir * c.turn)
                 node.yScale = s * CGFloat(c.turnY)
+                node.zRotation = CGFloat(-c.dir * c.spyRot)   // spyhop nose-up tilt (0 otherwise); sign maps canvas→SpriteKit
+                node.zPosition = CGFloat(c.frac)              // stable paint order by resting depth — overlaps never swap
                 node.alpha = CGFloat(c.alpha)
             }
 
@@ -239,7 +250,7 @@ final class OceanScene: SKScene {
     }
 
     private func syncSchool(_ c: Creature) {
-        let tex = ShapeBaker.texture(.fish, c.k, phase: wigPhase(c), scale: view?.window?.backingScaleFactor ?? 2)
+        let tex = ShapeBaker.texture(.fish, c.k, phase: wigPhase(c), sizeR: CGFloat(c.rT) * Const.schoolFish, scale: view?.window?.backingScaleFactor ?? 2)
         var members = schoolNodes[c.name] ?? []
         while members.count < c.off.count {
             let n = SKSpriteNode(); n.size = CGSize(width: ShapeBaker.nativeSize, height: ShapeBaker.nativeSize)
@@ -255,6 +266,7 @@ final class OceanScene: SKScene {
             let my = c.swimY + c.avoidY + o.dy + cos(c.t * 2 + o.ph) * 8
             n.position = CGPoint(x: CGFloat(mx), y: CGFloat(sim.H - my))
             n.xScale = s * CGFloat(c.dir * c.turn); n.yScale = s * CGFloat(c.turnY); n.alpha = CGFloat(c.alpha)
+            n.zPosition = CGFloat(c.frac)
         }
     }
 
@@ -317,7 +329,7 @@ final class OceanScene: SKScene {
 
     private func makeNode(for c: Creature) -> SKSpriteNode {
         let scale = view?.window?.backingScaleFactor ?? 2
-        let n = SKSpriteNode(texture: ShapeBaker.texture(c.k.shape, c.k, phase: 0, scale: scale))
+        let n = SKSpriteNode(texture: ShapeBaker.texture(c.k.shape, c.k, phase: 0, sizeR: CGFloat(c.rT), scale: scale))
         n.size = CGSize(width: ShapeBaker.nativeSize, height: ShapeBaker.nativeSize)  // body radius = refR
         creatureLayer.addChild(n)
         nodes[c.name] = n

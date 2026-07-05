@@ -11,9 +11,9 @@ real telemetry from this host.
 Configuration (all optional, data not code — see load_config() for the search
 path: $SPYHOP_PORT overrides the port; $SPYHOP_CONFIG -> ~/.config/spyhop/
 config.json -> ./spyhop.config.json for the JSON below):
-  { "creatures":  [ {match, shape, hue, ...}, ... ],   # pin processes to creatures
+  { "creatures":  [ {match, shape, hue, detail, ...}, ... ],   # pin processes to creatures
     "muteAlerts": [ "regex", ... ],                     # hide noisy netdata alerts
-    "render":     { fps, dpr, wiggle } }                # render trade-offs (see RENDER_DEFAULTS)
+    "render":     { fps, dpr, wiggle, creatureDetail } }        # render trade-offs (see RENDER_DEFAULTS)
   Creature entries are matched before DEFAULT_CREATURES, so they override the
   defaults without editing this file. The client fetches /config.json and
   renders from it, so this table is the single source of truth for both
@@ -41,7 +41,8 @@ CLK_TCK    = os.sysconf("SC_CLK_TCK")
 PAGE_KB    = os.sysconf("SC_PAGE_SIZE") // 1024
 TOP_FRAC   = 0.80            # keep the set covering this fraction of RSS / CPU
 MIN_GROUPS = 15              # always show at least this many (pad from next-largest by RSS)
-MAX_GROUPS = 30              # never show more than this (keep always-show creatures + largest)
+MAX_GROUPS = 40              # never show more than this (keep always-show creatures + largest);
+                            # clients may cap lower locally (the mac app has a "Max creatures" menu)
 STATE_TTL  = 2.0            # seconds; one real compute shared across viewers
 SLOW_TTL   = 8.0            # seconds; docker + netdata refresh cadence
 # ---------- creature config ----------
@@ -52,7 +53,7 @@ SLOW_TTL   = 8.0            # seconds; docker + netdata refresh cadence
 # The client fetches this table (merged with any user config) from /config.json,
 # so it is the single source of truth for both pinning and appearance.
 DEFAULT_CREATURES = [
-    {"match": "spyhop|nuc-pond", "shape": "angler", "hue": 46,  "sat": 85, "lit": 62, "spd": 0.42, "band": [.60, .84], "always": True},
+    {"match": "spyhop",          "shape": "angler", "hue": 46,  "sat": 85, "lit": 62, "spd": 0.42, "band": [.60, .84], "always": True},
     {"match": "qemu",            "shape": "whale",  "hue": 205, "sat": 28, "lit": 62, "spd": 0.26, "band": [.50, .78], "always": True},
     {"match": "netdata",         "shape": "jelly",  "hue": 286, "sat": 68, "lit": 72, "spd": 0.22, "band": [.16, .82], "always": True},
     {"match": "opencode",        "shape": "squid",  "hue": 32,  "sat": 88, "lit": 62, "spd": 0.70, "band": [.30, .60], "always": True},
@@ -145,7 +146,8 @@ if MUTE_ALERTS:
 #          moot there — the real lever is going below 30.)
 #   dpr    device-pixel-ratio cap; 0 = native (full sharpness). Cheap to keep at native
 #          on a draw-call-bound scene, but a lever on fill-bound GPUs.
-#   wiggle creature secondary animation (tail/pulse). false = rigid (cheaper to cache).
+#   wiggle creature secondary animation: "high" (animated) or "none" (rigid — the native app
+#          bakes 1 pose instead of 16, ~⅓ the texture memory). Legacy true/false map to high/none.
 #   windTiers  wind streaks: bucket the tail fade into N opacity/width tiers -> N strokes
 #              per streak instead of ~44. 0 = disabled (per-segment, original look). Lower
 #              N = cheaper, more stepped fade.
@@ -157,9 +159,11 @@ if MUTE_ALERTS:
 #              per frame instead of re-pathing + re-gradient-filling. 0 = live drawing
 #              (original). N only trades memory (N sprites/creature) vs wiggle smoothness;
 #              per-frame CPU is flat in N.
-RENDER_DEFAULTS = {"fps": 30, "dpr": 0, "wiggle": True, "windTiers": 0,
+#   creatureDetail  global default body detail: "complex" (richer fins/markings) or "simple"
+#              (leaner). Per-creature `detail` overrides it; clients may override per-machine.
+RENDER_DEFAULTS = {"fps": 30, "dpr": 0, "wiggle": "high", "windTiers": 0,
                    "windLength": 44, "windAlphaMin": 0.0, "windAlphaMax": 1.0,
-                   "spritePhases": 0}
+                   "spritePhases": 0, "creatureDetail": "complex"}
 def _render(doc):
     r = dict(RENDER_DEFAULTS)
     user = doc.get("render")
@@ -169,12 +173,16 @@ def _render(doc):
                 r[k] = user[k]
     r["fps"] = max(0, int(r["fps"] or 0))
     r["dpr"] = max(0, float(r["dpr"] or 0))
-    r["wiggle"] = bool(r["wiggle"])
+    w = r["wiggle"]
+    if isinstance(w, bool):
+        w = "high" if w else "none"
+    r["wiggle"] = "none" if str(w).lower() == "none" else "high"
     r["windTiers"] = max(0, int(r["windTiers"] or 0))
     r["windLength"] = max(2, int(r["windLength"] or 44))
     r["windAlphaMin"] = max(0.0, float(r["windAlphaMin"] or 0))
     r["windAlphaMax"] = max(0.0, float(r["windAlphaMax"] or 0))
     r["spritePhases"] = max(0, int(r["spritePhases"] or 0))
+    r["creatureDetail"] = "simple" if str(r["creatureDetail"]).lower() == "simple" else "complex"
     return r
 RENDER = _render(CONFIG)
 print("spyhop: render", RENDER)

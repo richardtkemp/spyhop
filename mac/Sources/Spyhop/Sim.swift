@@ -16,6 +16,7 @@ struct Kind {
     var band: (lo: Double, hi: Double)
     var mul: Double?
     var always: Bool?
+    var detail = "complex"   // resolved body-detail level for this kind ("simple" | "complex")
 }
 
 /// Mutable per-creature state (reference type — mutated in place across passes, like the JS object).
@@ -27,8 +28,10 @@ final class Creature {
     let frac: Double            // resting vertical position within [band.lo, band.hi]
     var r = 0.0, rT: Double     // eased radius / target
     var cpu = 0.0, cpuT: Double
+    var cpuSlow = 0.0           // slowly-integrated CPU — drives swim speed (momentum), vs `cpu` for wiggle
     let person: Double          // per-creature speed personality
     var dir: Double             // -1 / +1 heading
+    var dirLock = 0.0           // crabs: min time before `dir` may flip again (stops rapid jitter when boxed in)
     var t: Double               // local animation clock
     let bob: Double             // bob phase
     var x: Double
@@ -37,6 +40,11 @@ final class Creature {
     var act = 0.0               // cpu activity 0..1
     var wig = 0.0
     var boost = 0.0             // transient crab scoot
+    var spy = false             // currently performing a spyhop
+    var spyT = 0.0              // elapsed time within the current spyhop
+    var spyRot = 0.0            // canvas-convention tilt (rad, ≤0 = nose-up); OceanScene maps to zRotation
+    var spyWig = 0.0            // fluke-beat phase during a spyhop (driven by climb speed, not CPU)
+    var spyLiftPrev = 0.0       // previous frame's lift, to derive the vertical velocity
     var labelOffX = 0.0, labelOffY = 0.0, labelHW = 0.0
     var labelName = ""
     var arrive: Double          // 0..1 arrival progress
@@ -85,14 +93,16 @@ enum Const {
     static let farScale = 0.12, farTurn = 0.18, farYscale = 0.28, farAlpha = 0.12
     // eases
     static let easeR = 0.06, easeCpu = 0.05, easeStorm = 0.12, avoidDecay = 0.86, easeTemp = 0.05
+    static let easeCpuSlow = 0.012   // ~3s time constant: swim speed integrates recent CPU (accelerates), vs easeCpu for wiggle
     // speed
     static let speedFloor = 8.0, speedCeil = 95.0, cpuRef = 90.0
     // edge
     static let edgeZone = 90.0, edgeBoost = 2.4
     // wiggle
     static let wiggleBase = 4.0, wiggleCpu = 7.0
+    static let wiggleSizeRef = 24.0, wiggleSizeMin = 0.4   // bigger creatures beat fins slower
     // bob
-    static let bobFish = 16.0, bobSchool = 14.0, bobCpuBoost = 0.7, jellyDrift = 40.0
+    static let bobFish = 16.0, bobSchool = 14.0, bobCpuBoost = 0.7, jellyDrift = 40.0, jellyRate = 0.35
     // radius
     static let radBase = 6.0, memK = 0.85, radMax = 58.0, schoolFish = 0.9
     // avoid — gentle VERTICAL-only personal space (swimmers drift apart in depth to pass, never
@@ -101,11 +111,15 @@ enum Const {
     static let avoidGap = 1.7, avoidPush = 10.0
     static let crabNearGap = 1.7   // crabs are floor-pinned (no Y), so they still scoot on X
     // crab
-    static let crabNear = 1.7, crabBoost = 2.8, crabDecay = 0.9, crabCrawl = 1.0
+    static let crabNear = 1.7, crabBoost = 2.8, crabDecay = 0.9, crabCrawl = 1.0, crabDirLock = 0.6
     // label
     static let labelPush = 0.45, labelCrabPush = 1.0, charW = 6.4, labelDecay = 0.82
     static let tempWindowMs = 15000.0
     static let waterLevelF = 0.30, bedFrac = 0.90, wxMax = 1.6
+    // spyhop: one whale periodically rises to breach the surface (honours the app's name)
+    static let spyFirst = 5.0, spyPeriod = 180.0, spyRetry = 20.0, spyDur = 7.5
+    static let spyPeak = 0.4, spyTilt = 0.85, spySlow = 0.82   // peak at 40% → rise ~3s, slower fall ~4.5s, no hold
+    static let spyRiseWig = 28.0, spyFallWig = 12.0   // fluke-beat gains: beat ∝ vertical speed, gentler descending
     // weather
     static let weatherFloor = 0.18
     static let cloudBase = 3.0, cloudGain = 12.0, poolMax = 22.0, cloudFade = 0.03
@@ -123,6 +137,22 @@ enum Const {
 @inline(__always) func clampD(_ v: Double, _ a: Double, _ b: Double) -> Double { v < a ? a : (v > b ? b : v) }
 @inline(__always) func lerpD(_ a: Double, _ b: Double, _ t: Double) -> Double { a + (b - a) * t }
 @inline(__always) func easeOut(_ t: Double) -> Double { 1 - pow(1 - t, 3) }
+@inline(__always) func smoothstep(_ t: Double) -> Double { t * t * (3 - 2 * t) }
+/// Jelly propulsion stroke over one bell cycle: quick contraction (~35%) that jets it up, then a slow
+/// relaxation while it drifts back down — real jellyfish only power the up-stroke.
+func jellyPulse(_ u: Double) -> Double {
+    let f = u - floor(u)
+    return f < 0.35 ? smoothstep(f / 0.35) : 1 - smoothstep((f - 0.35) / 0.65)
+}
+/// Spyhop vertical profile 0→1→0: a smooth raised-cosine hump peaking at `spyPeak` (rise faster,
+/// fall slower). No flat top — it eases into the peak, kisses the surface still moving, then eases
+/// back down. Velocity is zero only for the instant of the turnaround.
+func spyLift(_ u: Double) -> Double {
+    if u <= 0 || u >= 1 { return 0 }
+    let p = Const.spyPeak
+    return u < p ? 0.5 - 0.5 * cos(.pi * u / p)
+                 : 0.5 + 0.5 * cos(.pi * (u - p) / (1 - p))
+}
 func hashHue(_ s: String) -> Double {
     var h = 0
     for ch in s.unicodeScalars { h = (h * 31 + Int(ch.value)) % 360 }
@@ -145,27 +175,32 @@ final class Sim {
     var env = Env()
 
     // config
-    var wiggle = true
+    var wiggleMode = "high"   // "high" (animated) | "none" (rigid — bakes 1 pose instead of 16)
     var windTiers = 0, windLength = 44
     var windA0 = 0.0, windA1 = 1.0
     var isBench = false
     var benchDayNight = false   // --daynight: cycle temp so the full sun↔moon transition is visible
     var showLabels = true
+    var maxCreatures: Int? = nil   // client-side cap on the roster (nil = render all the server sends)
+    var creatureDetailDefault = "complex"   // from render.creatureDetail (native detail is look-only)
 
     private(set) var order: [Creature] = []
     private var byName: [String: Creature] = [:]
     private var kinds: [Kind] = []
+    private var lastRoster: [RosterEntry] = []   // most recent server roster, for re-capping on a menu change
     private var firstLoad = true
     private var tempHist: [(t: TimeInterval, v: Double)] = []
 
     var clock = 0.0
+    private var nextSpyhop = Const.spyFirst   // sim-clock time the next whale spyhop is due
 
     // MARK: config -> kinds
 
     func setConfig(_ cfg: Config) {
-        wiggle = cfg.render.wiggle
+        wiggleMode = cfg.render.wiggleMode
         windTiers = cfg.render.windTiers; windLength = cfg.render.windLength
         windA0 = cfg.render.windAlphaMin; windA1 = cfg.render.windAlphaMax
+        creatureDetailDefault = cfg.render.creatureDetail
         kinds = cfg.creatures.compactMap { specToKind($0) }
         // Re-map any creatures that spawned before config arrived (fish fallback → real kind).
         for c in order {
@@ -176,12 +211,18 @@ final class Sim {
         }
     }
 
+    /// The creature's own `detail` if set, else the server's global default.
+    private func resolvedDetail(_ spec: String?) -> String {
+        if spec == "simple" || spec == "complex" { return spec! }
+        return creatureDetailDefault
+    }
+
     private func specToKind(_ c: CreatureConfig) -> Kind? {
         guard let re = try? NSRegularExpression(pattern: c.match, options: [.caseInsensitive]) else { return nil }
         let shape = Shape(rawValue: c.shape) ?? .fish
         let band: (Double, Double) = c.band.count >= 2 ? (c.band[0], c.band[1]) : (0.40, 0.78)
         return Kind(re: re, shape: shape, hue: c.hue, sat: c.sat, lit: c.lit, spd: c.spd,
-                    band: band, mul: c.mul, always: c.always)
+                    band: band, mul: c.mul, always: c.always, detail: resolvedDetail(c.detail))
     }
 
     private func kindOf(_ name: String) -> Kind {
@@ -192,7 +233,8 @@ final class Sim {
         }
         let h = hashHue(s)
         return Kind(re: nil, shape: .fish, hue: (h + 180).truncatingRemainder(dividingBy: 360),
-                    sat: 42, lit: 58, spd: 0.5 + Double(Int(h) % 30) / 60, band: (0.40, 0.78), mul: nil, always: nil)
+                    sat: 42, lit: 58, spd: 0.5 + Double(Int(h) % 30) / 60, band: (0.40, 0.78),
+                    mul: nil, always: nil, detail: resolvedDetail(nil))
     }
 
     private func radius(_ mib: Double, _ mul: Double?) -> Double {
@@ -231,8 +273,26 @@ final class Sim {
         reconcile(d.roster, now: now)
     }
 
+    /// Re-apply the current cap to the live scene right away (e.g. the "Max creatures" menu changed),
+    /// instead of waiting for the next state poll.
+    func applyCap(now: TimeInterval) { if !lastRoster.isEmpty { reconcile(lastRoster, now: now) } }
+
     private func reconcile(_ list: [RosterEntry], now: TimeInterval) {
-        for item in list {
+        lastRoster = list
+        // Client-side cap: the server sends its roster largest/pinned-first, so keep the prefix.
+        let kept = maxCreatures.map { Array(list.prefix($0)) } ?? list
+        // Creatures pushed out by the cap (still in the roster, just past the cut) leave at once —
+        // don't route them through the 60s keepAlive path, which is there to ride out a process that
+        // momentarily drops from a poll. Genuinely-vanished processes keep that grace. Raising the
+        // cap re-admits an over-cap creature below (its "leaving" flips back to "entering").
+        if maxCreatures != nil {
+            let keepNames = Set(kept.map { $0.name })
+            let inRoster = Set(list.map { $0.name })
+            for c in order where c.state != "leaving" && inRoster.contains(c.name) && !keepNames.contains(c.name) {
+                c.state = "leaving"
+            }
+        }
+        for item in kept {
             if let c = byName[item.name] {
                 c.mem = item.memMiB; c.count = item.count; c.cpuT = item.cpu; c.lastSeen = now
                 let per = c.k.shape == .school ? Double(item.memMiB) / Double(max(1, item.count)) : Double(item.memMiB)
@@ -256,8 +316,19 @@ final class Sim {
 
     // MARK: per-frame advance (pass 1 + 2 + 2b). Drawing is OceanScene's job (pass 3).
 
+    /// Pick one present whale (not already spyhopping) to start a spyhop, and set the next due time.
+    /// Retries sooner if there's no whale available, rather than skipping the whole period.
+    private func triggerSpyhop() {
+        let whales = order.filter { $0.k.shape == .whale && $0.state == "in" && !$0.spy }
+        guard !whales.isEmpty else { nextSpyhop = clock + Const.spyRetry; return }
+        let c = whales[min(whales.count - 1, Int(Double.random(in: 0..<1) * Double(whales.count)))]
+        c.spy = true; c.spyT = 0; c.spyWig = c.wig; c.spyLiftPrev = 0   // continue the fluke phase from where it was
+        nextSpyhop = clock + Const.spyPeriod
+    }
+
     func step(dt: Double, now: TimeInterval) {
         clock += dt
+        if clock >= nextSpyhop { triggerSpyhop() }
         let M = motionScale
         env.stormA += (env.stormAT - env.stormA) * Const.easeStorm
 
@@ -300,31 +371,50 @@ final class Sim {
                 if c.arrive <= 0 { dead.append(c.name); continue }
             }
             c.r += (c.rT - c.r) * Const.easeR
-            c.cpu += (c.cpuT - c.cpu) * Const.easeCpu
+            c.cpu += (c.cpuT - c.cpu) * Const.easeCpu             // fast — momentary effort (wiggle)
+            c.cpuSlow += (c.cpuT - c.cpuSlow) * Const.easeCpuSlow // slow — recent-seconds average (speed)
             let arrE = easeOut(c.arrive)
             c.act = clampD(c.cpu / Const.cpuRef, 0, 1)
+            let actSlow = clampD(c.cpuSlow / Const.cpuRef, 0, 1)
             c.rDraw = c.r * lerpD(Const.farScale, 1, arrE)
             c.turn = lerpD(Const.farTurn, 1, arrE)
             c.turnY = lerpD(Const.farYscale, 1, arrE)
             c.alpha = lerpD(Const.farAlpha, 1, arrE)
-            c.wig = wiggle ? c.t * (Const.wiggleBase + c.k.spd * 4 + c.act * Const.wiggleCpu) : 0
+            let sizeSlow = clampD(Const.wiggleSizeRef / c.rDraw, Const.wiggleSizeMin, 1)   // big creatures beat fins slower
+            let wigRate = c.k.shape == .jelly ? 2 * .pi * Const.jellyRate : Const.wiggleBase + c.k.spd * 4 + c.act * Const.wiggleCpu
+            c.wig = wiggleMode != "none" ? c.t * wigRate * sizeSlow : 0
             c.boost *= Const.crabDecay
+            c.dirLock -= dt
+            var lift = 0.0                                        // 0 = swimming normally; 0→1→0 over a spyhop
+            if c.spy {
+                c.spyT += dt
+                let u = c.spyT / Const.spyDur
+                if u >= 1 { c.spy = false; c.spyT = 0; c.spyRot = 0 }
+                else {
+                    lift = spyLift(u); c.spyRot = -Double.pi / 2 * Const.spyTilt * lift
+                    // Wiggle driven by the climb, not CPU: fast up (∝ rise speed), pause at the peak, slow down.
+                    let spyVel = (lift - c.spyLiftPrev) / max(dt, 1e-4); c.spyLiftPrev = lift
+                    let spyWigRate = (spyVel > 0 ? Const.spyRiseWig : Const.spyFallWig) * abs(spyVel)
+                    if wiggleMode != "none" { c.spyWig += spyWigRate * sizeSlow * dt; c.wig = c.spyWig }
+                }
+            }
             let edgeB = 1 + Const.edgeBoost * clampD(1 - min(abs(c.x), abs(W - c.x)) / Const.edgeZone, 0, 1)
-            var base = (Const.speedFloor + (Const.speedCeil - Const.speedFloor) * c.act) * c.k.spd
+            var base = (Const.speedFloor + (Const.speedCeil - Const.speedFloor) * actSlow) * c.k.spd   // accelerate toward the CPU-set ceiling over seconds
             if c.k.shape == .crab { base = max(base, Const.crabCrawl) }
-            let spd = base * c.person * arrE * edgeB * (1 + c.boost)
+            let spd = base * c.person * arrE * edgeB * (1 + c.boost) * (1 - Const.spySlow * lift)   // near-stationary while spyhopping
             c.t += dt
             c.x += c.dir * spd * dt * M
             let marg = c.rDraw + 8
             if c.x > W + marg { c.x = -marg } else if c.x < -marg { c.x = W + marg }
             let baseY = waterY + c.frac * (bedY - waterY)
             switch c.k.shape {
-            case .jelly: c.swimY = baseY + sin(c.t * 0.5) * Const.jellyDrift * M
-            case .crab: c.swimY = bedY - c.rDraw * 0.35
+            case .jelly: c.swimY = baseY + (0.45 - jellyPulse(c.wig / (2 * .pi))) * Const.jellyDrift * M   // jet up on contraction, drift down between
+            case .crab: c.swimY = bedY + 22 - c.rDraw * 0.7   // bottom edge sits at the seafloor trough (bedY + 22)
             default:
                 let amp = (c.k.shape == .school ? Const.bobSchool : Const.bobFish) * M * (1 + c.act * Const.bobCpuBoost)
                 c.swimY = baseY + sin(c.t * 0.7 + c.bob) * amp
             }
+            if lift > 0 { c.swimY += (waterY - c.rDraw * 0.12 - c.swimY) * lift }   // ease up from the normal bob toward a surface breach and back
             c.avoidY *= Const.avoidDecay
             c.labelOffX *= Const.labelDecay
             c.labelOffY *= Const.labelDecay
@@ -348,7 +438,8 @@ final class Sim {
                 if a.k.shape == .crab && b.k.shape == .crab {
                     if d < mn * Const.crabNearGap {
                         let big = a.rDraw >= b.rDraw ? a : b, small = big === a ? b : a
-                        big.boost = Const.crabBoost; big.dir = big.x >= small.x ? 1 : -1
+                        big.boost = Const.crabBoost
+                        if big.dirLock <= 0 { big.dir = big.x >= small.x ? 1 : -1; big.dirLock = Const.crabDirLock }   // commit, don't jitter
                     }
                     continue
                 }

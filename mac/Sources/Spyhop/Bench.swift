@@ -4,7 +4,7 @@ import Foundation
 /// benchmark the identical scene.
 struct Options {
     var bench = false
-    var url = URL(string: "http://192.168.1.150:8477")!
+    var url = URL(string: "http://your-host:8477")!
     var off: Set<String> = []
     var fpsOverride: Int?
     var seconds: Double?
@@ -59,7 +59,7 @@ enum Bench {
     static func defaultConfig() -> Config {
         let json = """
         {"creatures":[
-          {"match":"spyhop|nuc-pond","shape":"angler","hue":46,"sat":85,"lit":62,"spd":0.42,"band":[0.60,0.84]},
+          {"match":"spyhop","shape":"angler","hue":46,"sat":85,"lit":62,"spd":0.42,"band":[0.60,0.84]},
           {"match":"qemu","shape":"whale","hue":205,"sat":28,"lit":62,"spd":0.26,"band":[0.50,0.78]},
           {"match":"netdata","shape":"jelly","hue":286,"sat":68,"lit":72,"spd":0.22,"band":[0.16,0.82]},
           {"match":"opencode","shape":"squid","hue":32,"sat":88,"lit":62,"spd":0.70,"band":[0.30,0.60]},
