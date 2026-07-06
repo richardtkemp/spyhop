@@ -207,14 +207,14 @@
   function dot(x, y, r, fill) { ctx.fillStyle = fill; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); }
   function glow(r, k) { const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r); g.addColorStop(0, col(k, 12, .95)); g.addColorStop(.55, col(k, 0, .5)); g.addColorStop(1, col(k, -8, 0)); return g; }
   const radius = (mib, mul) => Math.min(CFG.radius.max, (CFG.radius.base + Math.sqrt(Math.max(1, mib)) * CFG.radius.memK) * (mul || 1));
-  const schoolOffs = n => Array.from({ length: n }, () => ({ dx: (rand() - .5) * 60, dy: (rand() - .5) * 40, vx: 0, vy: 0, pref: .7 + rand() * .7 }));
+  const schoolOffs = n => Array.from({ length: n }, () => ({ dx: (rand() - .5) * 60, dy: (rand() - .5) * 40, vx: 0, vy: 0, pref: .7 + rand() * .7, face: 1 }));
 
   // Boids: separation + alignment + cohesion, plus a gentle pull back toward the group's own
   // anchor point (so the shoal doesn't drift away from its label/position). O(n²) over the
   // school's own members only (n ≤ 8), never against other creatures — trivial per frame.
   // sep/neigh scale with the member's actual on-screen radius (bigger fish keep more distance)
   // and each member's own `pref` personality, so the spacing isn't a uniform crystal-grid.
-  function updateBoids(off, dt, dir, memberR) {
+  function updateBoids(off, dt, memberR) {
     const S = CFG.shoal, n = off.length;
     const sepBase = memberR * S.sepK, neighBase = memberR * S.neighK, range = neighBase * S.rangeK;
     for (let i = 0; i < n; i++) {
@@ -232,7 +232,7 @@
       oi.vx += ax * dt; oi.vy += ay * dt;
       const spd = Math.hypot(oi.vx, oi.vy) || .001, cl = clamp(spd, S.minSpd, S.maxSpd);
       oi.vx = oi.vx / spd * cl; oi.vy = oi.vy / spd * cl;
-      if (oi.vx * dir < 0) oi.vx *= .15;   // heavily damp drift that opposes the shoal's facing — no swimming backward
+      if (Math.abs(oi.vx) > 4) oi.face = oi.vx > 0 ? 1 : -1;   // face actual direction of travel (hysteresis: only flip on a clear signal, so it doesn't flicker near zero)
       oi.dx = clamp(oi.dx + oi.vx * dt, -range, range);
       oi.dy = clamp(oi.dy + oi.vy * dt, -range, range);
     }
@@ -723,7 +723,7 @@
       if (c.k.shape === 'jelly') c.swimY = baseY + Math.sin(c.t * CFG.bob.jellySlow + c.bob) * CFG.bob.jellyDrift * M;   // slow, smooth drift — decoupled from the (activity-driven) tentacle pulse
       else if (c.k.shape === 'crab') c.swimY = bedY + 22 - c.rDraw * .7;   // bottom edge at the seafloor trough
       else { const amp = (c.k.shape === 'school' ? CFG.bob.school : CFG.bob.fish) * M * (1 + c.act * CFG.bob.cpuBoost); c.swimY = baseY + Math.sin(c.t * .7 + c.bob) * amp; }
-      if (c.k.shape === 'school') updateBoids(c.off, dt, c.dir, c.rDraw * CFG.radius.schoolFish);
+      if (c.k.shape === 'school') updateBoids(c.off, dt, c.rDraw * CFG.radius.schoolFish);
       if (lift > 0) c.swimY += (waterY - c.rDraw * .12 - c.swimY) * lift;   // ease up from the normal bob toward a surface breach and back
       c.avoidY *= CFG.ease.avoidDecay; c.labelOff.x *= CFG.label.decay; c.labelOff.y *= CFG.label.decay;
       c.labelName = c.k.shape === 'school' ? `${c.name} ×${c.count}` : c.name;
@@ -774,7 +774,7 @@
       else if (k === 'ray') drawRay(c, c.x, y, r);
       else if (k === 'angler') drawAngler(c, c.x, y, r, clock);
       else if (k === 'crab') drawCrab(c, c.x, y, r);
-      else if (k === 'school') { const fn = SPRITE_PHASES ? blitFish : drawFish; for (const o of c.off) fn(c, c.x + o.dx, y + o.dy, r * CFG.radius.schoolFish); }
+      else if (k === 'school') { const fn = SPRITE_PHASES ? blitFish : drawFish; for (const o of c.off) fn(o.face === c.dir ? c : { ...c, dir: o.face }, c.x + o.dx, y + o.dy, r * CFG.radius.schoolFish); }
       else (SPRITE_PHASES ? blitFish : drawFish)(c, c.x, y, r);
       ctx.globalAlpha = 1;
       if (showLabels || hov === c) label(hov === c ? `${c.labelName} · ${c.mem} MiB` : c.labelName, c.x + c.labelOff.x, y - r - (k === 'whale' ? r * .5 : 8) + c.labelOff.y, hov === c);

@@ -265,7 +265,7 @@ final class OceanScene: SKScene {
             let mx = c.x + o.dx
             let my = c.swimY + c.avoidY + o.dy
             n.position = CGPoint(x: CGFloat(mx), y: CGFloat(sim.H - my))
-            n.xScale = s * CGFloat(c.dir * c.turn); n.yScale = s * CGFloat(c.turnY); n.alpha = CGFloat(c.alpha)
+            n.xScale = s * CGFloat(o.face * c.turn); n.yScale = s * CGFloat(c.turnY); n.alpha = CGFloat(c.alpha)
             n.zPosition = CGFloat(c.frac)
         }
     }

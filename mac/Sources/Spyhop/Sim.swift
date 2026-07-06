@@ -50,10 +50,10 @@ final class Creature {
     var arrive: Double          // 0..1 arrival progress
     var state: String           // entering | in | leaving
     var lastSeen: TimeInterval
-    var off: [(dx: Double, dy: Double, vx: Double, vy: Double, pref: Double)]  // school member offsets + boids velocity + spacing personality
+    var off: [(dx: Double, dy: Double, vx: Double, vy: Double, pref: Double, face: Double)]  // school member offsets + boids velocity + spacing personality + facing
 
     init(item: RosterEntry, kind: Kind, present: Bool, now: TimeInterval,
-         radius: (Double, Double?) -> Double, schoolOffs: (Int) -> [(Double, Double, Double, Double, Double)]) {
+         radius: (Double, Double?) -> Double, schoolOffs: (Int) -> [(Double, Double, Double, Double, Double, Double)]) {
         name = item.name; mem = item.memMiB; count = item.count; k = kind
         let per = kind.shape == .school ? Double(item.memMiB) / Double(max(1, item.count)) : Double(item.memMiB)
         let members = kind.shape == .school ? min(8, max(2, item.count)) : 1
@@ -68,7 +68,7 @@ final class Creature {
         arrive = present ? 1 : 0
         state = present ? "in" : "entering"
         lastSeen = now
-        off = schoolOffs(members).map { ($0.0, $0.1, $0.2, $0.3, $0.4) }
+        off = schoolOffs(members).map { ($0.0, $0.1, $0.2, $0.3, $0.4, $0.5) }
         if present { r = rT }
     }
 }
@@ -246,10 +246,10 @@ final class Sim {
         min(Const.radMax, (Const.radBase + sqrt(max(1, mib)) * Const.memK) * (mul ?? 1))
     }
 
-    private func schoolOffs(_ n: Int) -> [(Double, Double, Double, Double, Double)] {
+    private func schoolOffs(_ n: Int) -> [(Double, Double, Double, Double, Double, Double)] {
         (0..<n).map { _ in ((Double.random(in: 0..<1) - 0.5) * 60,
                             (Double.random(in: 0..<1) - 0.5) * 40, 0, 0,
-                            0.7 + Double.random(in: 0..<1) * 0.7) }
+                            0.7 + Double.random(in: 0..<1) * 0.7, 1) }
     }
 
     /// Boids: separation + alignment + cohesion, plus a gentle pull back toward the group's own
@@ -257,7 +257,7 @@ final class Sim {
     /// school's own members only (n ≤ 8), never against other creatures — trivial per frame.
     /// sep/neigh scale with the member's actual on-screen radius (bigger fish keep more distance)
     /// and each member's own `pref` personality, so the spacing isn't a uniform crystal-grid.
-    private func updateBoids(_ off: inout [(dx: Double, dy: Double, vx: Double, vy: Double, pref: Double)], dt: Double, dir: Double, memberR: Double) {
+    private func updateBoids(_ off: inout [(dx: Double, dy: Double, vx: Double, vy: Double, pref: Double, face: Double)], dt: Double, memberR: Double) {
         let n = off.count
         let sepBase = memberR * Const.shoalSepK, neighBase = memberR * Const.shoalNeighK, range = neighBase * Const.shoalRangeK
         for i in 0..<n {
@@ -280,7 +280,7 @@ final class Sim {
             let spd = max(0.001, (off[i].vx * off[i].vx + off[i].vy * off[i].vy).squareRoot())
             let cl = clampD(spd, Const.shoalMinSpd, Const.shoalMaxSpd)
             off[i].vx = off[i].vx / spd * cl; off[i].vy = off[i].vy / spd * cl
-            if off[i].vx * dir < 0 { off[i].vx *= 0.15 }   // heavily damp drift that opposes the shoal's facing — no swimming backward
+            if abs(off[i].vx) > 4 { off[i].face = off[i].vx > 0 ? 1 : -1 }   // face actual direction of travel (hysteresis: only flip on a clear signal, so it doesn't flicker near zero)
             off[i].dx = clampD(off[i].dx + off[i].vx * dt, -range, range)
             off[i].dy = clampD(off[i].dy + off[i].vy * dt, -range, range)
         }
@@ -458,7 +458,7 @@ final class Sim {
                 let amp = (c.k.shape == .school ? Const.bobSchool : Const.bobFish) * M * (1 + c.act * Const.bobCpuBoost)
                 c.swimY = baseY + sin(c.t * 0.7 + c.bob) * amp
             }
-            if c.k.shape == .school { updateBoids(&c.off, dt: dt, dir: c.dir, memberR: c.rDraw * Const.schoolFish) }
+            if c.k.shape == .school { updateBoids(&c.off, dt: dt, memberR: c.rDraw * Const.schoolFish) }
             if lift > 0 { c.swimY += (waterY - c.rDraw * 0.12 - c.swimY) * lift }   // ease up from the normal bob toward a surface breach and back
             c.avoidY *= Const.avoidDecay
             c.labelOffX *= Const.labelDecay
