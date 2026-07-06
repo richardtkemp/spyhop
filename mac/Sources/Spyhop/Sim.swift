@@ -107,9 +107,9 @@ enum Const {
     // radius
     static let radBase = 6.0, memK = 0.85, radMax = 58.0, schoolFish = 0.9
     // shoal (boids tuning for school members) — sepK/neighK scale with each member's actual drawn size
-    static let shoalSepK = 1.8, shoalNeighK = 2.1, shoalSepForce = 480.0
-    static let shoalAlign = 0.45, shoalCohesion = 0.28, shoalHome = 0.06, shoalMaxSpd = 46.0, shoalMinSpd = 8.0
-    static let shoalWander = 34.0, shoalRangeK = 2.8
+    static let shoalSepK = 1.8, shoalNeighK = 2.1, shoalSepForce = 650.0
+    static let shoalAlign = 0.55, shoalCohesion = 0.35, shoalHome = 0.1, shoalMaxSpd = 46.0, shoalMinSpd = 8.0
+    static let shoalWander = 18.0, shoalRangeK = 2.6
     // avoid — gentle VERTICAL-only personal space (swimmers drift apart in depth to pass, never
     // shoved horizontally). Wide range (gap), cubic ramp so force builds slowly from ~0 at the
     // edge, and a low ceiling (avoidPush small). Diverges from the web's bidirectional push+slide.
@@ -249,7 +249,7 @@ final class Sim {
     private func schoolOffs(_ n: Int) -> [(Double, Double, Double, Double, Double, Double)] {
         (0..<n).map { _ in ((Double.random(in: 0..<1) - 0.5) * 60,
                             (Double.random(in: 0..<1) - 0.5) * 40, 0, 0,
-                            0.7 + Double.random(in: 0..<1) * 0.7, 1) }
+                            0.8 + Double.random(in: 0..<1) * 0.5, 1) }
     }
 
     /// Boids: separation + alignment + cohesion, plus a gentle pull back toward the group's own
