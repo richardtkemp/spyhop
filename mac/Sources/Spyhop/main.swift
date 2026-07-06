@@ -77,8 +77,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: telemetry
 
+    /// Precedence: --url= / SPYHOP_URL (this launch only, never saved) > the saved menu-bar
+    /// setting > the compiled-in placeholder (a real address is expected to be configured).
+    private func resolveURL() -> URL {
+        options.urlOverride ?? Prefs.serverURL.flatMap(URL.init(string:)) ?? URL(string: "http://your-host:8477")!
+    }
+
+    /// Re-point at a (possibly new) server: stop the old poller first so its timer doesn't keep
+    /// firing, then start fresh against the current resolveURL().
+    private func restartTelemetry() {
+        telemetry?.stop()
+        startTelemetry()
+    }
+
     private func startTelemetry() {
-        let t = Telemetry(baseURL: options.url); telemetry = t
+        let t = Telemetry(baseURL: resolveURL()); telemetry = t
         t.onConfig = { [weak self] cfg in self?.lastConfig = cfg; self?.applyConfig(cfg) }
         t.onState = { [weak self] st in self?.lastState = st; self?.forEachSim { $0.applyState(st, now: ProcessInfo.processInfo.systemUptime) } }
         if options.bench {
@@ -192,6 +205,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
         menu.addItem(withTitle: options.bench ? "spyhop (bench)" : "spyhop wallpaper", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
+        let urlLabel = NSMenuItem(title: "Server: \(serverURLDisplay())", action: nil, keyEquivalent: ""); urlLabel.isEnabled = false
+        menu.addItem(urlLabel)
+        let setURL = NSMenuItem(title: "Set server URL…", action: #selector(setServerURL), keyEquivalent: ""); setURL.target = self
+        menu.addItem(setURL)
+        menu.addItem(.separator())
         let header = NSMenuItem(title: "Displays", action: nil, keyEquivalent: ""); header.isEnabled = false
         menu.addItem(header)
         let rendered = Set(windows.keys)
@@ -261,6 +279,34 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"); quit.target = self
         menu.addItem(quit)
+    }
+
+    private func serverURLDisplay() -> String {
+        if let o = options.urlOverride { return "\(o.absoluteString) (--url override)" }
+        return Prefs.serverURL ?? "not set"
+    }
+
+    /// Prompt for the server base URL and save it (unless a --url/SPYHOP_URL override is active
+    /// this launch, in which case the save takes effect next time the app starts without one).
+    @objc private func setServerURL() {
+        let alert = NSAlert()
+        alert.messageText = "Spyhop Server"
+        alert.informativeText = options.urlOverride != nil
+            ? "A --url / SPYHOP_URL override (\(options.urlOverride!.absoluteString)) is active for this launch and takes precedence. What you save here applies next time the app starts without one."
+            : "Base URL of the spyhop telemetry server, e.g. http://192.168.1.50:8477"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.stringValue = Prefs.serverURL ?? ""
+        field.placeholderString = "http://your-host:8477"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let s = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !s.isEmpty, URL(string: s) != nil else { return }
+        Prefs.serverURL = s
+        if options.urlOverride == nil { restartTelemetry() }
     }
 
     /// Register/unregister the bundle as a login item (SMAppService, macOS 13+). No-op with a

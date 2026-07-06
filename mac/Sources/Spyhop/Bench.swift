@@ -4,7 +4,7 @@ import Foundation
 /// benchmark the identical scene.
 struct Options {
     var bench = false
-    var url = URL(string: "http://your-host:8477")!
+    var urlOverride: URL?   // --url= / SPYHOP_URL — session-only, wins over the saved menu-bar setting, never persisted
     var off: Set<String> = []
     var fpsOverride: Int?
     var seconds: Double?
@@ -14,13 +14,13 @@ struct Options {
     static func parse(_ args: [String], env: [String: String]) -> Options {
         var o = Options()
         if env["SPYHOP_BENCH"] != nil { o.bench = true }
-        if let u = env["SPYHOP_URL"], let url = URL(string: u) { o.url = url }
+        if let u = env["SPYHOP_URL"], let url = URL(string: u) { o.urlOverride = url }
         for a in args.dropFirst() {
             switch true {
             case a == "--bench": o.bench = true
             case a == "--daynight": o.daynight = true
             case a == "--one-screen": o.oneScreen = true
-            case a.hasPrefix("--url="): if let u = URL(string: String(a.dropFirst(6))) { o.url = u }
+            case a.hasPrefix("--url="): if let u = URL(string: String(a.dropFirst(6))) { o.urlOverride = u }
             case a.hasPrefix("--off="): o.off = Set(a.dropFirst(6).split(separator: ",").map(String.init))
             case a.hasPrefix("--fps="): o.fpsOverride = Int(a.dropFirst(6))
             case a.hasPrefix("--seconds="): o.seconds = Double(a.dropFirst(10))

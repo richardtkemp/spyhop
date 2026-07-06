@@ -25,8 +25,10 @@ Creature animation can be overridden per-machine from the menu (see
 [Controls](#controls-menu-bar-icon)); on the native app `detail` is a look-only
 choice (baked either way), so it's left to the server / web client.
 
-Point it at your server with `SPYHOP_URL` / `--url=` (default
-`http://your-host:8477` — set it to your host).
+Point it at your server from the menu-bar 🐳 menu → **Set server URL…** — saved, so it
+persists across restarts (no need to re-enter it). `SPYHOP_URL` / `--url=` override it
+for a single launch without saving, taking precedence over the saved value — handy for
+one-off testing against a different host.
 
 ## Why native
 
@@ -85,7 +87,7 @@ directly onto the desktop behind your icons. To start it automatically, tick
 
 | Flag / env | Effect |
 | --- | --- |
-| `--url=<url>` · `SPYHOP_URL` | Telemetry server (default `http://your-host:8477`) |
+| `--url=<url>` · `SPYHOP_URL` | Telemetry server for this launch only, not saved (wins over the menu-bar setting) |
 | `--bench` · `SPYHOP_BENCH` | Compiled-in synthetic workload; never polls. Cycles day→night, ramps disk 0→100%, toggles alerts every 2s |
 | `--one-screen` | Render on the built-in (smallest) display only — for a fair vs-web benchmark |
 | `--off=a,b` | Disable named subsystems (e.g. `--off=streaks`) for profiling |
@@ -95,6 +97,9 @@ directly onto the desktop behind your icons. To start it automatically, tick
 
 ### Controls (menu-bar icon)
 
+- **Set server URL…** — the telemetry server's base URL; saved, so it persists
+  across restarts. Shows "(--url override)" if `--url=`/`SPYHOP_URL` is active
+  for this launch — that wins over the saved value without overwriting it.
 - **Displays ▸** — tick which screens to render on (empty = all).
 - **Mirror** — clone one aquarium to every screen, or run each independently.
 - **Rendering (this Mac)** — client-side overrides of the server's `render`

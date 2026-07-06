@@ -17,6 +17,14 @@ enum Prefs {
         set { d.set(newValue, forKey: "mirror"); d.synchronize() }
     }
 
+    /// Telemetry server base URL, set via the menu-bar "Set server URL…" prompt. nil = not set
+    /// (falls back to the compiled-in placeholder). Overridden per-launch, without persisting, by
+    /// --url= / SPYHOP_URL.
+    static var serverURL: String? {
+        get { d.string(forKey: "serverURL") }
+        set { set(newValue, "serverURL") }
+    }
+
     // Per-machine overrides of server render config (nil = follow the server's value).
     /// Animation frames per creature (1 = rigid … 30). Drives texture memory. nil = follow server.
     static var framesOverride: Int? {
