@@ -102,7 +102,8 @@ enum Const {
     static let wiggleBase = 4.0, wiggleCpu = 7.0
     static let wiggleSizeRef = 24.0, wiggleSizeMin = 0.4   // bigger creatures beat fins slower
     // bob
-    static let bobFish = 16.0, bobSchool = 14.0, bobCpuBoost = 0.7, jellyDrift = 40.0, jellyRate = 0.35
+    static let bobFish = 16.0, bobSchool = 14.0, bobCpuBoost = 0.7, jellyDrift = 12.0, jellyRate = 0.35, jellySlow = 0.22   // jellyRate: bell/tentacle pulse rate; jellySlow: the (much slower, decoupled) vertical drift
+    static let whaleFlipperK = 70.0   // flipper phase rate = whaleFlipperK * (1 + act) / rDraw — big whales flap lazily (~4s/beat near max size), small ones twitch faster
     // radius
     static let radBase = 6.0, memK = 0.85, radMax = 58.0, schoolFish = 0.9
     // avoid — gentle VERTICAL-only personal space (swimmers drift apart in depth to pass, never
@@ -381,8 +382,13 @@ final class Sim {
             c.turnY = lerpD(Const.farYscale, 1, arrE)
             c.alpha = lerpD(Const.farAlpha, 1, arrE)
             let sizeSlow = clampD(Const.wiggleSizeRef / c.rDraw, Const.wiggleSizeMin, 1)   // big creatures beat fins slower
-            let wigRate = c.k.shape == .jelly ? 2 * .pi * Const.jellyRate : Const.wiggleBase + c.k.spd * 4 + c.act * Const.wiggleCpu
-            c.wig = wiggleMode != "none" ? c.t * wigRate * sizeSlow : 0
+            let wigRate: Double
+            switch c.k.shape {
+            case .jelly: wigRate = (2 * .pi * Const.jellyRate + c.act * Const.wiggleCpu) * sizeSlow          // momentary activity → faster tentacle pulse
+            case .whale: wigRate = Const.whaleFlipperK * (1 + c.act) / max(c.rDraw, 1)                       // uncapped size scaling: big whales flap lazily
+            default: wigRate = (Const.wiggleBase + c.k.spd * 4 + c.act * Const.wiggleCpu) * sizeSlow
+            }
+            c.wig = wiggleMode != "none" ? c.t * wigRate : 0
             c.boost *= Const.crabDecay
             c.dirLock -= dt
             var lift = 0.0                                        // 0 = swimming normally; 0→1→0 over a spyhop
@@ -408,7 +414,7 @@ final class Sim {
             if c.x > W + marg { c.x = -marg } else if c.x < -marg { c.x = W + marg }
             let baseY = waterY + c.frac * (bedY - waterY)
             switch c.k.shape {
-            case .jelly: c.swimY = baseY + (0.45 - jellyPulse(c.wig / (2 * .pi))) * Const.jellyDrift * M   // jet up on contraction, drift down between
+            case .jelly: c.swimY = baseY + sin(c.t * Const.jellySlow + c.bob) * Const.jellyDrift * M   // slow, smooth drift — decoupled from the (activity-driven) tentacle pulse
             case .crab: c.swimY = bedY + 22 - c.rDraw * 0.7   // bottom edge sits at the seafloor trough (bedY + 22)
             default:
                 let amp = (c.k.shape == .school ? Const.bobSchool : Const.bobFish) * M * (1 + c.act * Const.bobCpuBoost)

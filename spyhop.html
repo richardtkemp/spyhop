@@ -50,7 +50,8 @@
     speed: { floor: 8, ceil: 95, cpuRef: 90 },
     edge: { zone: 90, boost: 2.4 },                            // speed up near the screen edges so nobody loiters
     wiggle: { base: 4, cpu: 7, sizeRef: 24, sizeMin: 0.4 },       // sizeRef/sizeMin: bigger creatures beat fins slower
-    bob: { fish: 16, school: 14, cpuBoost: 0.7, jellyDrift: 40, jellyRate: 0.35 },   // jellyRate: bell pulses/sec
+    bob: { fish: 16, school: 14, cpuBoost: 0.7, jellyDrift: 12, jellyRate: 0.35, jellySlow: 0.22 },   // jellyRate: bell/tentacle pulse rate; jellySlow: the (much slower, decoupled) vertical drift
+    whale: { flipperK: 70 },                                    // flipper phase rate = flipperK * (1 + act) / rDraw — big whales flap lazily (~4s/beat near max size), small ones twitch faster
     radius: { base: 6, memK: 0.85, max: 58, schoolFish: 0.9 },
     avoid: { gap: 0.72, push: 90, yBias: 1.0, slide: 1.8 },    // slide: strong tangential unstick so head-on pairs pass
     crab: { near: 1.7, boost: 2.8, decay: 0.9, crawl: 1, dirLock: 0.6 },   // near crabs: the larger scoots away; dirLock: min s before it may flip again
@@ -414,19 +415,27 @@
   }
   function drawCrab(c, x, y, r) {
     begin(c, x, y); const cx = detailOf(c.k) === 'complex'; ctx.globalCompositeOperation = 'source-over';
-    ctx.strokeStyle = col(c.k, -12, .85); ctx.lineWidth = 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.strokeStyle = col(c.k, -12, .85); ctx.lineWidth = Math.max(2.8, r * .1); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     for (const sgn of [-1, 1]) for (let i = 0; i < 3; i++) {
       const lx = (i - 1) * r * .5, sw = Math.sin(c.wig + i + (sgn > 0 ? 0 : 1.6)) * r * .12;
       if (cx) { ctx.beginPath(); ctx.moveTo(lx, 0); ctx.lineTo(lx + sgn * r * .42, r * .32 + sw * .6); ctx.lineTo(lx + sgn * r * .6, r * .62 + sw); ctx.stroke(); }   // knee-jointed legs
       else { ctx.beginPath(); ctx.moveTo(lx, 0); ctx.lineTo(lx + sgn * r * .5, r * .5 + sw); ctx.stroke(); }
     }
-    ctx.strokeStyle = col(c.k, -4, .9);
+    ctx.strokeStyle = col(c.k, -4, .9); ctx.lineWidth = Math.max(3.6, r * .16);
     for (const sgn of [-1, 1]) {
-      const ex = sgn * r * 1.2, ey = -r * .5 + Math.sin(c.wig) * r * .08;
+      const ex = sgn * r * 1.15, ey = -r * .5 + Math.sin(c.wig) * r * .08;
       ctx.beginPath(); ctx.moveTo(sgn * r * .7, -r * .1); ctx.lineTo(ex, ey); ctx.stroke();       // arm
-      if (cx) { const gap = Math.abs(Math.sin(c.wig * 2 + (sgn > 0 ? 0 : 1))) * r * .12 + r * .04; ctx.fillStyle = col(c.k, -2, .95);   // pincer opens/closes
-        ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(ex + sgn * r * .3, ey - r * .05 - gap); ctx.lineTo(ex + sgn * r * .16, ey - gap * .2); ctx.closePath(); ctx.fill();
-        ctx.beginPath(); ctx.moveTo(ex, ey); ctx.lineTo(ex + sgn * r * .28, ey + r * .1 + gap * .3); ctx.lineTo(ex + sgn * r * .15, ey + gap * .2); ctx.closePath(); ctx.fill(); }
+      if (cx) {   // asymmetric claw: hooked/curved top finger (dactyl), near-straight bottom finger, with a real cut-through gap between the tips
+        const open = Math.abs(Math.sin(c.wig * 2 + (sgn > 0 ? 0 : 1))), g = r * .05 + open * r * .08, hw = r * .17;
+        ctx.fillStyle = col(c.k, -2, .95);
+        ctx.beginPath(); ctx.moveTo(ex, ey - hw);
+        ctx.quadraticCurveTo(ex + sgn * r * .46, ey - r * .4, ex + sgn * r * .75, ey - r * .12);          // hooked top: one curved sweep out to a sharp point
+        ctx.quadraticCurveTo(ex + sgn * r * .55, ey + g * .05, ex + sgn * r * .26, ey + g * .15);          // curves back inward — the open mouth, cut back near the hinge
+        ctx.quadraticCurveTo(ex + sgn * r * .39, ey + g * .7, ex + sgn * r * .52, ey + r * .08 + g * .6);  // back out to the straight finger's tip
+        ctx.quadraticCurveTo(ex + sgn * r * .29, ey + r * .2, ex, ey + hw);                              // near-straight bottom finger back to the hinge
+        ctx.closePath(); ctx.fill();
+        ctx.strokeStyle = col(c.k, -26, .75); ctx.lineWidth = Math.max(1, r * .035); ctx.stroke();
+      }
     }
     const cg = ctx.createRadialGradient(0, -r * .1, 0, 0, -r * .1, r);                             // opaque shaded shell (symmetric)
     cg.addColorStop(0, col(c.k, 2, 1)); cg.addColorStop(.55, col(c.k, -16, 1)); cg.addColorStop(1, col(c.k, -32, 1));   // darker toward the rim
@@ -658,7 +667,10 @@
       const actSlow = clamp(c.cpuSlow / CFG.speed.cpuRef, 0, 1);              // integrated → speed
       c.rDraw = c.r * lerp(CFG.far.scale, 1, arrE); c.turn = lerp(CFG.far.turn, 1, arrE); c.turnY = lerp(CFG.far.yscale, 1, arrE); c.alpha = lerp(CFG.far.alpha, 1, arrE);
       const sizeSlow = clamp(CFG.wiggle.sizeRef / c.rDraw, CFG.wiggle.sizeMin, 1);   // big creatures beat fins slower
-      c.wig = WIG_MODE !== 'none' ? c.t * (c.k.shape === 'jelly' ? TAU * CFG.bob.jellyRate : CFG.wiggle.base + c.k.spd * 4 + c.act * CFG.wiggle.cpu) * sizeSlow : 0;   // 'none' = rigid
+      const wigRate = c.k.shape === 'jelly' ? (TAU * CFG.bob.jellyRate + c.act * CFG.wiggle.cpu) * sizeSlow           // momentary activity → faster tentacle pulse
+        : c.k.shape === 'whale' ? CFG.whale.flipperK * (1 + c.act) / Math.max(c.rDraw, 1)                             // uncapped size scaling: big whales flap lazily
+        : (CFG.wiggle.base + c.k.spd * 4 + c.act * CFG.wiggle.cpu) * sizeSlow;
+      c.wig = WIG_MODE !== 'none' ? c.t * wigRate : 0;   // 'none' = rigid
       c.boost *= CFG.crab.decay; c.dirLock -= dt;
       let lift = 0;                                                               // 0 = swimming normally; 0→1→0 over a spyhop
       if (c.spy) {
@@ -678,7 +690,7 @@
       c.t += dt; c.x += c.dir * spd * dt * M;
       const marg = c.rDraw + 8; if (c.x > W + marg) c.x = -marg; else if (c.x < -marg) c.x = W + marg;   // wrap as soon as fully offscreen, so they re-enter promptly
       const baseY = waterY + c.frac * (bedY - waterY);
-      if (c.k.shape === 'jelly') c.swimY = baseY + (.45 - jellyPulse(c.wig / TAU)) * CFG.bob.jellyDrift * M;   // jet up on contraction, drift down between
+      if (c.k.shape === 'jelly') c.swimY = baseY + Math.sin(c.t * CFG.bob.jellySlow + c.bob) * CFG.bob.jellyDrift * M;   // slow, smooth drift — decoupled from the (activity-driven) tentacle pulse
       else if (c.k.shape === 'crab') c.swimY = bedY + 22 - c.rDraw * .7;   // bottom edge at the seafloor trough
       else { const amp = (c.k.shape === 'school' ? CFG.bob.school : CFG.bob.fish) * M * (1 + c.act * CFG.bob.cpuBoost); c.swimY = baseY + Math.sin(c.t * .7 + c.bob) * amp; }
       if (lift > 0) c.swimY += (waterY - c.rDraw * .12 - c.swimY) * lift;   // ease up from the normal bob toward a surface breach and back

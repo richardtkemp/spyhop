@@ -351,7 +351,7 @@ enum ShapeBaker {
             for i in 0..<3 {
                 let lx = (CGFloat(i) - 1) * r * 0.5
                 let sw = CGFloat(sin(wig + Double(i) + (sgn > 0 ? 0 : 1.6))) * r * 0.12
-                stroke(ctx, col(k, -12, 0.85), 2) { p in
+                stroke(ctx, col(k, -12, 0.85), max(2.8, r * 0.1)) { p in
                     p.move(to: .init(x: lx, y: 0))
                     if cx { p.addLine(to: .init(x: lx + sgn * r * 0.42, y: r * 0.32 + sw * 0.6)); p.addLine(to: .init(x: lx + sgn * r * 0.6, y: r * 0.62 + sw)) }
                     else { p.addLine(to: .init(x: lx + sgn * r * 0.5, y: r * 0.5 + sw)) }
@@ -359,12 +359,20 @@ enum ShapeBaker {
             }
         }
         for sgn in [CGFloat(-1), 1] {   // arms (with opening pincers when complex)
-            let ex = sgn * r * 1.2, ey = -r * 0.5 + CGFloat(sin(wig)) * r * 0.08
-            stroke(ctx, col(k, -4, 0.9), 2) { p in p.move(to: .init(x: sgn * r * 0.7, y: -r * 0.1)); p.addLine(to: .init(x: ex, y: ey)) }
-            if cx {
-                let gap = abs(CGFloat(sin(wig * 2 + (sgn > 0 ? 0 : 1)))) * r * 0.12 + r * 0.04
-                fill(ctx, triPath(ex, ey, ex + sgn * r * 0.3, ey - r * 0.05 - gap, ex + sgn * r * 0.16, ey - gap * 0.2), col(k, -2, 0.95))
-                fill(ctx, triPath(ex, ey, ex + sgn * r * 0.28, ey + r * 0.1 + gap * 0.3, ex + sgn * r * 0.15, ey + gap * 0.2), col(k, -2, 0.95))
+            let ex = sgn * r * 1.15, ey = -r * 0.5 + CGFloat(sin(wig)) * r * 0.08
+            stroke(ctx, col(k, -4, 0.9), max(3.6, r * 0.16)) { p in p.move(to: .init(x: sgn * r * 0.7, y: -r * 0.1)); p.addLine(to: .init(x: ex, y: ey)) }
+            if cx {   // asymmetric claw: hooked/curved top finger (dactyl), near-straight bottom finger, with a real cut-through gap between the tips
+                // NB: sized to stay within ShapeBaker's bake canvas (pad * refR from centre) — a bigger claw here gets clipped in the native app's fixed-size texture.
+                let open = abs(CGFloat(sin(wig * 2 + (sgn > 0 ? 0 : 1)))), g = r * 0.05 + open * r * 0.08, hw = r * 0.17
+                let claw = CGMutablePath()
+                claw.move(to: .init(x: ex, y: ey - hw))
+                claw.addQuadCurve(to: .init(x: ex + sgn * r * 0.75, y: ey - r * 0.12), control: .init(x: ex + sgn * r * 0.46, y: ey - r * 0.4))    // hooked top: one curved sweep out to a sharp point
+                claw.addQuadCurve(to: .init(x: ex + sgn * r * 0.26, y: ey + g * 0.15), control: .init(x: ex + sgn * r * 0.55, y: ey + g * 0.05))  // curves back inward — the open mouth, cut back near the hinge
+                claw.addQuadCurve(to: .init(x: ex + sgn * r * 0.52, y: ey + r * 0.08 + g * 0.6), control: .init(x: ex + sgn * r * 0.39, y: ey + g * 0.7))   // back out to the straight finger's tip
+                claw.addQuadCurve(to: .init(x: ex, y: ey + hw), control: .init(x: ex + sgn * r * 0.29, y: ey + r * 0.2))                          // near-straight bottom finger back to the hinge
+                claw.closeSubpath()
+                fill(ctx, claw, col(k, -2, 0.95))
+                stroke(ctx, col(k, -26, 0.75), max(1, r * 0.035)) { p in p.addPath(claw) }
             }
         }
         fillDome(ctx, ellipsePath(0, 0, r, r * 0.7), k, r, cy: -r * 0.1)                      // opaque shaded shell (symmetric)
