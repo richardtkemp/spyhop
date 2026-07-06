@@ -50,10 +50,10 @@ final class Creature {
     var arrive: Double          // 0..1 arrival progress
     var state: String           // entering | in | leaving
     var lastSeen: TimeInterval
-    var off: [(dx: Double, dy: Double, ph: Double)]  // school member offsets
+    var off: [(dx: Double, dy: Double, vx: Double, vy: Double)]  // school member offsets + boids velocity
 
     init(item: RosterEntry, kind: Kind, present: Bool, now: TimeInterval,
-         radius: (Double, Double?) -> Double, schoolOffs: (Int) -> [(Double, Double, Double)]) {
+         radius: (Double, Double?) -> Double, schoolOffs: (Int) -> [(Double, Double, Double, Double)]) {
         name = item.name; mem = item.memMiB; count = item.count; k = kind
         let per = kind.shape == .school ? Double(item.memMiB) / Double(max(1, item.count)) : Double(item.memMiB)
         let members = kind.shape == .school ? min(8, max(2, item.count)) : 1
@@ -68,7 +68,7 @@ final class Creature {
         arrive = present ? 1 : 0
         state = present ? "in" : "entering"
         lastSeen = now
-        off = schoolOffs(members).map { ($0.0, $0.1, $0.2) }
+        off = schoolOffs(members).map { ($0.0, $0.1, $0.2, $0.3) }
         if present { r = rT }
     }
 }
@@ -106,6 +106,9 @@ enum Const {
     static let whaleFlipperK = 70.0   // flipper phase rate = whaleFlipperK * (1 + act) / rDraw — big whales flap lazily (~4s/beat near max size), small ones twitch faster
     // radius
     static let radBase = 6.0, memK = 0.85, radMax = 58.0, schoolFish = 0.9
+    // shoal (boids tuning for school members)
+    static let shoalSep = 22.0, shoalSepForce = 900.0, shoalNeigh = 46.0
+    static let shoalAlign = 0.6, shoalCohesion = 0.4, shoalHome = 0.15, shoalMaxSpd = 46.0, shoalMinSpd = 8.0
     // avoid — gentle VERTICAL-only personal space (swimmers drift apart in depth to pass, never
     // shoved horizontally). Wide range (gap), cubic ramp so force builds slowly from ~0 at the
     // edge, and a low ceiling (avoidPush small). Diverges from the web's bidirectional push+slide.
@@ -242,10 +245,37 @@ final class Sim {
         min(Const.radMax, (Const.radBase + sqrt(max(1, mib)) * Const.memK) * (mul ?? 1))
     }
 
-    private func schoolOffs(_ n: Int) -> [(Double, Double, Double)] {
+    private func schoolOffs(_ n: Int) -> [(Double, Double, Double, Double)] {
         (0..<n).map { _ in ((Double.random(in: 0..<1) - 0.5) * 60,
-                            (Double.random(in: 0..<1) - 0.5) * 40,
-                            Double.random(in: 0..<1) * .pi * 2) }
+                            (Double.random(in: 0..<1) - 0.5) * 40, 0, 0) }
+    }
+
+    /// Boids: separation + alignment + cohesion, plus a gentle pull back toward the group's own
+    /// anchor point (so the shoal doesn't drift away from its label/position). O(n²) over the
+    /// school's own members only (n ≤ 8), never against other creatures — trivial per frame.
+    private func updateBoids(_ off: inout [(dx: Double, dy: Double, vx: Double, vy: Double)], dt: Double) {
+        let n = off.count
+        for i in 0..<n {
+            var sepX = 0.0, sepY = 0.0, alX = 0.0, alY = 0.0, cohX = 0.0, cohY = 0.0, near = 0
+            for j in 0..<n where j != i {
+                let dx = off[i].dx - off[j].dx, dy = off[i].dy - off[j].dy
+                let d = max(0.001, (dx * dx + dy * dy).squareRoot())
+                if d < Const.shoalSep { let f = (Const.shoalSep - d) / Const.shoalSep; sepX += (dx / d) * f; sepY += (dy / d) * f }
+                if d < Const.shoalNeigh { alX += off[j].vx; alY += off[j].vy; cohX += off[j].dx; cohY += off[j].dy; near += 1 }
+            }
+            var ax = sepX * Const.shoalSepForce - off[i].dx * Const.shoalHome
+            var ay = sepY * Const.shoalSepForce - off[i].dy * Const.shoalHome
+            if near > 0 {
+                let nf = Double(near)
+                ax += (alX / nf - off[i].vx) * Const.shoalAlign + (cohX / nf - off[i].dx) * Const.shoalCohesion
+                ay += (alY / nf - off[i].vy) * Const.shoalAlign + (cohY / nf - off[i].dy) * Const.shoalCohesion
+            }
+            off[i].vx += ax * dt; off[i].vy += ay * dt
+            let spd = max(0.001, (off[i].vx * off[i].vx + off[i].vy * off[i].vy).squareRoot())
+            let cl = clampD(spd, Const.shoalMinSpd, Const.shoalMaxSpd)
+            off[i].vx = off[i].vx / spd * cl; off[i].vy = off[i].vy / spd * cl
+            off[i].dx += off[i].vx * dt; off[i].dy += off[i].vy * dt
+        }
     }
 
     // MARK: telemetry ingest (applyState)
@@ -420,6 +450,7 @@ final class Sim {
                 let amp = (c.k.shape == .school ? Const.bobSchool : Const.bobFish) * M * (1 + c.act * Const.bobCpuBoost)
                 c.swimY = baseY + sin(c.t * 0.7 + c.bob) * amp
             }
+            if c.k.shape == .school { updateBoids(&c.off, dt: dt) }
             if lift > 0 { c.swimY += (waterY - c.rDraw * 0.12 - c.swimY) * lift }   // ease up from the normal bob toward a surface breach and back
             c.avoidY *= Const.avoidDecay
             c.labelOffX *= Const.labelDecay

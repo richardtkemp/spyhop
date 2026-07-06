@@ -262,8 +262,8 @@ final class OceanScene: SKScene {
         for (i, n) in members.enumerated() {
             let o = c.off[i]
             n.texture = tex
-            let mx = c.x + o.dx + sin(c.t * 2 + o.ph) * 8
-            let my = c.swimY + c.avoidY + o.dy + cos(c.t * 2 + o.ph) * 8
+            let mx = c.x + o.dx
+            let my = c.swimY + c.avoidY + o.dy
             n.position = CGPoint(x: CGFloat(mx), y: CGFloat(sim.H - my))
             n.xScale = s * CGFloat(c.dir * c.turn); n.yScale = s * CGFloat(c.turnY); n.alpha = CGFloat(c.alpha)
             n.zPosition = CGFloat(c.frac)

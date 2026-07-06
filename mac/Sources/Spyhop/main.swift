@@ -42,6 +42,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if CommandLine.arguments.contains("--snap") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in self?.snapshot(exitAfter: true) }
         }
+        if let secs = options.seconds {   // --seconds=N — auto-exit for scripted benchmark runs
+            DispatchQueue.main.asyncAfter(deadline: .now() + secs) { NSApp.terminate(nil) }
+        }
     }
 
     private func snapshot(exitAfter: Bool) {
