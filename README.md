@@ -13,6 +13,8 @@ One stdlib-only Python file serves the page and a live telemetry feed; one
 self-contained HTML file draws the scene on a `<canvas>`. No dependencies, no
 build step, no external network calls.
 
+![spyhop screenshot](screenshot.png)
+
 ## What the scene means
 
 | You see | It means |
