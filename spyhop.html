@@ -246,8 +246,7 @@
       oi.vx += ax * dt; oi.vy += ay * dt;
       const spd = Math.hypot(oi.vx, oi.vy) || .001, cl = clamp(spd, S.minSpd, S.maxSpd);
       oi.vx = oi.vx / spd * cl; oi.vy = oi.vy / spd * cl;
-      if (drift > 0 && oi.vx < -drift) oi.vx = -drift; else if (drift < 0 && oi.vx > -drift) oi.vx = -drift;   // never translate backward through the shoal (clamp absolute x-velocity to the drift's side)
-      const avx = drift + oi.vx; if (Math.abs(avx) > 4) oi.face = avx > 0 ? 1 : -1;   // face absolute direction of travel (drift + relative); hysteresis so it doesn't flicker near zero
+      const avx = drift + oi.vx; if (Math.abs(avx) > 4) oi.face = avx > 0 ? 1 : -1;   // face the absolute direction of travel (drift + relative) — a fish drifting backward turns to face that way; hysteresis stops flicker near zero
       oi.dx = clamp(oi.dx + oi.vx * dt, -range, range);
       oi.dy = clamp(oi.dy + oi.vy * dt, -range, range);
     }

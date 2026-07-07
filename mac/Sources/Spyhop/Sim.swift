@@ -309,8 +309,7 @@ final class Sim {
             let spd = max(0.001, (off[i].vx * off[i].vx + off[i].vy * off[i].vy).squareRoot())
             let cl = clampD(spd, Const.shoalMinSpd, Const.shoalMaxSpd)
             off[i].vx = off[i].vx / spd * cl; off[i].vy = off[i].vy / spd * cl
-            if drift > 0 && off[i].vx < -drift { off[i].vx = -drift } else if drift < 0 && off[i].vx > -drift { off[i].vx = -drift }   // never translate backward through the shoal
-            let avx = drift + off[i].vx; if abs(avx) > 4 { off[i].face = avx > 0 ? 1 : -1 }   // face absolute direction of travel (drift + relative); hysteresis so it doesn't flicker near zero
+            let avx = drift + off[i].vx; if abs(avx) > 4 { off[i].face = avx > 0 ? 1 : -1 }   // face the absolute direction of travel (drift + relative) — a fish drifting backward turns to face that way; hysteresis stops flicker near zero
             off[i].dx = clampD(off[i].dx + off[i].vx * dt, -range, range)
             off[i].dy = clampD(off[i].dy + off[i].vy * dt, -range, range)
         }
