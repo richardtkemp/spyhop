@@ -46,7 +46,9 @@ TOP_FRAC   = 0.80            # keep the set covering this fraction of RSS / CPU
 MIN_GROUPS = 15              # always show at least this many (pad from next-largest by RSS)
 MAX_GROUPS = 40              # never show more than this (keep always-show creatures + largest);
                             # clients may cap lower locally (the mac app has a "Max creatures" menu)
-SCHOOL_MAX = 8              # a school draws at most this many fish -> send this many real RSS sizes
+SCHOOL_MAX = 128           # a school draws at most this many fish -> send this many real RSS sizes
+                           # (high safety ceiling rather than truly unbounded, so a group with hundreds
+                           #  of threads can't spawn a framerate-killing shoal; raise/remove if wanted)
 STATE_TTL  = 2.0            # seconds; one real compute shared across viewers
 SLOW_TTL   = 8.0            # seconds; docker + netdata refresh cadence
 # ---------- creature config ----------

@@ -28,6 +28,8 @@ struct SchoolMember {
     var size = 1.0                    // draw-radius multiplier (real process RSS)
     var phase = 0.0                   // tail-wiggle phase offset — independent per member
     var wig = 0.0                     // current wiggle phase (recomputed each frame from phase + size-based rate)
+    var wax = 0.0, way = 0.0          // wander drift acceleration, held for ~wanderHold seconds
+    var wt = 0.0                      // time left before repicking the wander drift
 }
 
 /// Mutable per-creature state (reference type — mutated in place across passes, like the JS object).
@@ -59,6 +61,8 @@ final class Creature {
     var spyWig = 0.0            // fluke-beat phase during a spyhop (driven by climb speed, not CPU)
     var spyLiftPrev = 0.0       // previous frame's lift, to derive the vertical velocity
     var labelOffX = 0.0, labelOffY = 0.0, labelHW = 0.0
+    var cx = 0.0, cy = 0.0, topRel = 0.0        // school: members' centroid offset + top of the shoal (rel. to swimY)
+    var labelAX = 0.0, labelAY = 0.0            // base label position (before labelOff); schools track the shoal, not the anchor
     var labelName = ""
     var arrive: Double          // 0..1 arrival progress
     var state: String           // entering | in | leaving
@@ -77,7 +81,7 @@ final class Creature {
          radius: (Double, Double?) -> Double, schoolOffs: (Int) -> [SchoolMember]) {
         name = item.name; mem = item.memMiB; count = item.count; sizes = item.sizes; cpus = item.cpus; k = kind
         let per = kind.shape == .school ? Double(item.memMiB) / Double(max(1, item.count)) : Double(item.memMiB)
-        let members = kind.shape == .school ? min(8, max(2, item.count)) : 1
+        let members = kind.shape == .school ? min(Const.maxShoal, max(2, item.count)) : 1
         frac = kind.band.lo + Double.random(in: 0..<1) * (kind.band.hi - kind.band.lo)
         rT = radius(per, kind.mul)
         cpuT = item.cpu
@@ -118,6 +122,7 @@ enum Const {
     static let easeCpuSlow = 0.012   // ~3s time constant: swim speed integrates recent CPU (accelerates), vs easeCpu for wiggle
     // speed
     static let speedFloor = 8.0, speedCeil = 95.0, cpuRef = 90.0
+    static let maxShoal = 128   // max fish drawn per school (matches server SCHOOL_MAX); safety ceiling, not a tight cap
     // edge
     static let edgeZone = 90.0, edgeBoost = 2.4
     // wiggle
@@ -127,11 +132,11 @@ enum Const {
     static let bobFish = 16.0, bobSchool = 14.0, bobCpuBoost = 0.7, jellyDrift = 12.0, jellyRate = 0.35, jellySlow = 0.22   // jellyRate: bell/tentacle pulse rate; jellySlow: the (much slower, decoupled) vertical drift
     static let whaleFlipperK = 70.0   // flipper phase rate = whaleFlipperK * (1 + act) / rDraw — big whales flap lazily (~4s/beat near max size), small ones twitch faster
     // radius
-    static let radBase = 6.0, memK = 0.85, radMax = 58.0, schoolFish = 0.9
+    static let radBase = 3.0, memK = 0.85, radMax = 58.0, schoolFish = 0.9   // radBase = smallest-fish radius (halved from 6)
     // shoal (boids tuning for school members) — sepK/neighK scale with each member's actual drawn size
-    static let shoalSepK = 0.7, shoalNeighK = 2.1, shoalSepForce = 650.0   // sep spacing scales with each PAIR's real drawn size (small fish stay close)
-    static let shoalAlign = 0.55, shoalCohesion = 0.5, shoalHome = 0.15, shoalMaxSpd = 46.0, shoalMinSpd = 8.0
-    static let shoalWander = 6.0   // held together by cohesion, centred by the home spring (no box) — like textbook Reynolds boids
+    static let shoalSepK = 0.7, shoalSepForce = 650.0   // sep spacing scales with each PAIR's real drawn size (small fish stay close)
+    static let shoalAlign = 0.55, shoalCohesion = 0.5, shoalWall = 8.0, shoalWallDamp = 3.0, shoalMaxSpd = 46.0, shoalMinSpd = 8.0   // no anchor; wall = spring+damper keeping the fish body under the wave trough / above the bed without bouncing
+    static let shoalWander = 6.0, shoalWanderHold = 2.0   // wander = a drift each fish holds for ~wanderHold s (a meander, not per-frame noise)
     // avoid — gentle VERTICAL-only personal space (swimmers drift apart in depth to pass, never
     // shoved horizontally). Wide range (gap), cubic ramp so force builds slowly from ~0 at the
     // edge, and a low ceiling (avoidPush small). Diverges from the web's bidirectional push+slide.
@@ -278,6 +283,27 @@ final class Sim {
                                         phase: Double.random(in: 0..<1) * .pi * 2) }
     }
 
+    // Distance-weighted centroid of a school (robust to a straggler) — mirrors spyhop.html labelCentroid.
+    // Members far from the group are down-weighted, so the label tracks the bulk not a lone wanderer.
+    // Two reweight passes; topRel = top of the core (well-weighted) members so the label clears the group.
+    private func labelCentroid(_ c: Creature, _ rf: Double) {
+        let n = Double(c.off.count), s2 = (rf * 4) * (rf * 4)   // weight falls off ~4 fish-radii out
+        var cx = 0.0, cy = 0.0
+        for m in c.off { cx += m.dx; cy += m.dy }
+        cx /= n; cy /= n
+        var top = Double.greatestFiniteMagnitude
+        for it in 0..<2 {
+            var wx = 0.0, wy = 0.0, ws = 0.0; top = Double.greatestFiniteMagnitude
+            for m in c.off {
+                let ex = m.dx - cx, ey = m.dy - cy, w = 1 / (1 + (ex * ex + ey * ey) / s2)
+                wx += w * m.dx; wy += w * m.dy; ws += w
+                if it == 1 && w > 0.25 { let t = m.dy - rf * m.size; if t < top { top = t } }
+            }
+            cx = wx / ws; cy = wy / ws
+        }
+        c.cx = cx; c.cy = cy; c.topRel = top < Double.greatestFiniteMagnitude ? top : cy - rf
+    }
+
     /// Boids: separation + alignment + cohesion, plus a gentle pull back toward the group's own
     /// anchor point (so the shoal doesn't drift away from its label/position). O(n²) over the
     /// school's own members only (n ≤ 8), never against other creatures — trivial per frame.
@@ -286,26 +312,35 @@ final class Sim {
     // drift = the whole shoal's horizontal velocity (c.dir*spd*M). A member's on-screen motion is
     // drift + its shoal-relative vx, so facing must key off that sum — otherwise a fish nudged toward
     // the back of a forward-drifting shoal faces backward while actually moving forward.
-    private func updateBoids(_ off: inout [SchoolMember], dt: Double, memberR: Double, drift: Double) {
+    private func updateBoids(_ off: inout [SchoolMember], dt: Double, memberR: Double, drift: Double, swimY: Double) {
         let n = off.count
-        let neighBase = memberR * Const.shoalNeighK
         for i in 0..<n {
-            let ri = memberR * off[i].size, neigh = neighBase * off[i].pref
+            let ri = memberR * off[i].size
+            off[i].wt -= dt
+            if off[i].wt <= 0 {   // hold a random drift ~wanderHold s, then repick — a slow meander per fish, not per-frame noise
+                off[i].wax = (Double.random(in: 0..<1) - 0.5) * Const.shoalWander
+                off[i].way = (Double.random(in: 0..<1) - 0.5) * Const.shoalWander
+                off[i].wt = Const.shoalWanderHold * (0.7 + Double.random(in: 0..<1) * 0.6)
+            }
             var sepX = 0.0, sepY = 0.0, alX = 0.0, alY = 0.0, cohX = 0.0, cohY = 0.0, near = 0
             for j in 0..<n where j != i {
                 let dx = off[i].dx - off[j].dx, dy = off[i].dy - off[j].dy
                 let d = max(0.001, (dx * dx + dy * dy).squareRoot())
                 let sep = (ri + memberR * off[j].size) * Const.shoalSepK * off[i].pref   // spacing = the two fish's real radii -> tiny fish crowd close, big fish keep room
                 if d < sep { let f = (sep - d) / sep; sepX += (dx / d) * f; sepY += (dy / d) * f }
-                if d < neigh { alX += off[j].vx; alY += off[j].vy; cohX += off[j].dx; cohY += off[j].dy; near += 1 }
+                alX += off[j].vx; alY += off[j].vy; cohX += off[j].dx; cohY += off[j].dy; near += 1   // infinite sensing radius: every member is a neighbour for align + cohesion
             }
-            var ax = sepX * Const.shoalSepForce - off[i].dx * Const.shoalHome + (Double.random(in: 0..<1) - 0.5) * Const.shoalWander
-            var ay = sepY * Const.shoalSepForce - off[i].dy * Const.shoalHome + (Double.random(in: 0..<1) - 0.5) * Const.shoalWander
+            var ax = sepX * Const.shoalSepForce + off[i].wax
+            var ay = sepY * Const.shoalSepForce + off[i].way
             if near > 0 {
                 let nf = Double(near)
                 ax += (alX / nf - off[i].vx) * Const.shoalAlign + (cohX / nf - off[i].dx) * Const.shoalCohesion
                 ay += (alY / nf - off[i].vy) * Const.shoalAlign + (cohY / nf - off[i].dy) * Const.shoalCohesion
             }
+            let my = swimY + off[i].dy, half = ri * 0.6   // half = fish body's vertical half-height; measure the body top/bottom, not the centre
+            let surfY = waterY + 1.4 * env.waveAmp        // surface = wave trough (deepest the surface dips)
+            let topGap = (my - half) - surfY, hr = ri * 1.5   // hr = headroom where the surface wall kicks in (raised so fish are held a bit further below the surface)
+            if topGap < hr { ay += (hr - topGap) * Const.shoalWall - off[i].vy * Const.shoalWallDamp } else { let botGap = bedY - (my + half); if botGap < ri { ay -= (ri - botGap) * Const.shoalWall + off[i].vy * Const.shoalWallDamp } }
             off[i].vx += ax * dt; off[i].vy += ay * dt
             let spd = max(0.001, (off[i].vx * off[i].vx + off[i].vy * off[i].vy).squareRoot())
             let cl = clampD(spd, Const.shoalMinSpd, Const.shoalMaxSpd)
@@ -367,7 +402,7 @@ final class Sim {
                 c.rT = radius(per, c.k.mul)
                 if c.state == "leaving" { c.state = "entering" }
                 if c.k.shape == .school {
-                    let w = min(8, max(2, item.count))
+                    let w = min(Const.maxShoal, max(2, item.count))
                     while c.off.count < w { c.off.append(schoolOffs(1)[0]) }
                     if c.off.count > w { c.off.removeLast(c.off.count - w) }
                     c.applyFishSizes(radius)
@@ -497,12 +532,13 @@ final class Sim {
             }
             if c.k.shape == .school {
                 let rf = c.rDraw * Const.schoolFish, wb0 = Const.wiggleBase + c.k.spd * 4
-                updateBoids(&c.off, dt: dt, memberR: rf, drift: c.dir * spd * M)
+                updateBoids(&c.off, dt: dt, memberR: rf, drift: c.dir * spd * M, swimY: c.swimY)
                 for i in c.off.indices {   // independent tail beat: own phase + own size-based rate + own process CPU (busy procs flick faster)
                     let mAct = c.cpus.isEmpty ? c.act : clampD(c.cpus[i % c.cpus.count] / Const.cpuRef, 0, 1)
                     let mr = clampD(Const.wiggleSizeRef / max(rf * c.off[i].size, 1), Const.wiggleSizeMin, 1)
                     c.off[i].wig = wiggleMode != "none" ? c.t * (wb0 + mAct * Const.wiggleCpu) * mr + c.off[i].phase : 0
                 }
+                labelCentroid(c, rf)   // distance-weighted centroid (label ignores a wandered-off straggler)
             }
             if lift > 0 { c.swimY += (waterY - c.rDraw * 0.12 - c.swimY) * lift }   // ease up from the normal bob toward a surface breach and back
             c.avoidY *= Const.avoidDecay
@@ -510,6 +546,12 @@ final class Sim {
             c.labelOffY *= Const.labelDecay
             c.labelName = c.k.shape == .school ? "\(c.name) ×\(c.count)" : c.name
             c.labelHW = Double(c.labelName.count) * Const.charW / 2
+            if c.k.shape == .school {   // label follows the members' centroid, above the topmost fish (wrapped like the fish)
+                var lx = (c.x + c.cx).truncatingRemainder(dividingBy: W); if lx < 0 { lx += W }
+                c.labelAX = lx; c.labelAY = c.swimY + c.avoidY + c.topRel - 8
+            } else {
+                c.labelAX = c.x; c.labelAY = c.swimY + c.avoidY - c.rDraw - 8
+            }
         }
         for name in dead { remove(name) }
 
@@ -546,8 +588,8 @@ final class Sim {
             for i in 0..<arr.count {
                 for j in (i + 1)..<arr.count {
                     let a = arr[i], b = arr[j]
-                    let ax = a.x + a.labelOffX, ay = a.swimY + a.avoidY - a.rDraw + a.labelOffY
-                    let bx = b.x + b.labelOffX, by = b.swimY + b.avoidY - b.rDraw + b.labelOffY
+                    let ax = a.labelAX + a.labelOffX, ay = a.labelAY + a.labelOffY
+                    let bx = b.labelAX + b.labelOffX, by = b.labelAY + b.labelOffY
                     let ox = (a.labelHW + b.labelHW + 6) - abs(bx - ax)
                     let oy = 15 - abs(by - ay)
                     if ox > 0 && oy > 0 {

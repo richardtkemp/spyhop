@@ -239,8 +239,8 @@ final class OceanScene: SKScene {
             if sim.showLabels {
                 let lbl = labels[c.name] ?? makeLabel(c.name)
                 if lbl.text != c.labelName { lbl.text = c.labelName }
-                lbl.position = CGPoint(x: CGFloat(c.x + c.labelOffX),
-                                       y: CGFloat(sim.H - (c.swimY + c.avoidY - c.rDraw - 8 + c.labelOffY)))
+                lbl.position = CGPoint(x: CGFloat(c.labelAX + c.labelOffX),
+                                       y: CGFloat(sim.H - (c.labelAY + c.labelOffY)))
                 lbl.alpha = CGFloat(c.alpha)
             }
         }
