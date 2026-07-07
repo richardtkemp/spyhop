@@ -25,12 +25,13 @@ State contract:
   cpu (host busy%), memPct, swapPct              # cpu/mem/swap gauges
   alarms (count), alerts [{n,s,v,u}]             # raised netdata alarms
   containers
-  roster [{n, m(MiB), c(count), cpu(max % of one core in the group), s[MiB per proc]}]
+  roster [{n, m(MiB), c(count), cpu(max % of one core in the group), s[MiB per proc], sc[cpu% per proc]}]
       -> the set of process-groups that together make up TOP_FRAC of total RSS
          OR total CPU (union), plus every "always-show" named creature present.
          Selection is eager here; the client defers removals.
-         s is the largest SCHOOL_MAX individual RSS values (desc) so the client can
-         size each fish in a school by its real process, not the group mean.
+         s/sc are the largest SCHOOL_MAX processes (by RSS, desc) as parallel arrays,
+         so the client can size (s) and animate (sc) each school fish by its real
+         process rather than the group mean.
 """
 import glob, json, os, re, subprocess, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -363,7 +364,7 @@ def _sample_procs():
 
 
 def process_groups():
-    """Aggregate by command name: [rss_kb, count, cpu_max%, [rss_kb per process]]."""
+    """Aggregate by command name: [rss_kb, count, cpu_max%, [(rss_kb, cpu%) per process]]."""
     global _prev_procs, _prev_procs_t
     now = time.monotonic()
     procs = _sample_procs()
@@ -377,10 +378,17 @@ def process_groups():
         if dt > 0 and pid in prev and jif > prev[pid]:
             cpu = (jif - prev[pid]) / CLK_TCK / dt * 100
         a = agg.setdefault(name, [0, 0, 0.0, []])
-        a[0] += rss; a[1] += 1; a[2] = max(a[2], cpu); a[3].append(rss)
+        a[0] += rss; a[1] += 1; a[2] = max(a[2], cpu); a[3].append((rss, cpu))
     _prev_procs = {pid: v[2] for pid, v in procs.items()}
     _prev_procs_t = now
     return agg
+
+
+def _top_procs(procs):
+    """The SCHOOL_MAX largest processes (by RSS), split into parallel s (MiB) and sc (cpu%) lists —
+    so the client can size AND animate each school fish by its own real process."""
+    top = sorted(procs, key=lambda rc: -rc[0])[:SCHOOL_MAX]
+    return {"s": [rss // 1024 for rss, _ in top], "sc": [round(cpu, 1) for _, cpu in top]}
 
 
 def _cover(items, key):
@@ -397,9 +405,8 @@ def _cover(items, key):
 
 
 def roster():
-    groups = sorted(({"n": n, "m": kb // 1024, "c": c, "cpu": round(cpu, 1),
-                      "s": [r // 1024 for r in sorted(sizes, reverse=True)[:SCHOOL_MAX]]}
-                     for n, (kb, c, cpu, sizes) in process_groups().items()),
+    groups = sorted(({"n": n, "m": kb // 1024, "c": c, "cpu": round(cpu, 1), **_top_procs(procs)}
+                     for n, (kb, c, cpu, procs) in process_groups().items()),
                     key=lambda g: -g["m"])
     always = {g["n"] for g in groups if ALWAYS_RE.search(g["n"])}
     keep = _cover(groups, lambda g: g["m"]) | _cover(groups, lambda g: g["cpu"]) | always

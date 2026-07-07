@@ -36,6 +36,7 @@ final class Creature {
     var mem: Int
     var count: Int
     var sizes: [Int]            // real RSS (MiB) per process, for sizing individual school members
+    var cpus: [Double]          // cpu% per process (aligned with sizes), for per-member tail-beat rate
     var k: Kind
     let frac: Double            // resting vertical position within [band.lo, band.hi]
     var r = 0.0, rT: Double     // eased radius / target
@@ -74,7 +75,7 @@ final class Creature {
 
     init(item: RosterEntry, kind: Kind, present: Bool, now: TimeInterval,
          radius: (Double, Double?) -> Double, schoolOffs: (Int) -> [SchoolMember]) {
-        name = item.name; mem = item.memMiB; count = item.count; sizes = item.sizes; k = kind
+        name = item.name; mem = item.memMiB; count = item.count; sizes = item.sizes; cpus = item.cpus; k = kind
         let per = kind.shape == .school ? Double(item.memMiB) / Double(max(1, item.count)) : Double(item.memMiB)
         let members = kind.shape == .school ? min(8, max(2, item.count)) : 1
         frac = kind.band.lo + Double.random(in: 0..<1) * (kind.band.hi - kind.band.lo)
@@ -130,7 +131,7 @@ enum Const {
     // shoal (boids tuning for school members) — sepK/neighK scale with each member's actual drawn size
     static let shoalSepK = 0.9, shoalNeighK = 2.1, shoalSepForce = 650.0   // sep spacing scales with each PAIR's real drawn size (small fish stay close)
     static let shoalAlign = 0.55, shoalCohesion = 0.35, shoalHome = 0.1, shoalMaxSpd = 46.0, shoalMinSpd = 8.0
-    static let shoalWander = 18.0, shoalRangeK = 3.2   // shoal box; roomy so nobody pins to the wall
+    static let shoalWander = 18.0, shoalRangeK = 2.6, shoalEdgeForce = 800.0   // rangeK = round soft-boundary radius; edgeForce eases fish back inside it (no square hard wall)
     // avoid — gentle VERTICAL-only personal space (swimmers drift apart in depth to pass, never
     // shoved horizontally). Wide range (gap), cubic ramp so force builds slowly from ~0 at the
     // edge, and a low ceiling (avoidPush small). Diverges from the web's bidirectional push+slide.
@@ -305,13 +306,14 @@ final class Sim {
                 ax += (alX / nf - off[i].vx) * Const.shoalAlign + (cohX / nf - off[i].dx) * Const.shoalCohesion
                 ay += (alY / nf - off[i].vy) * Const.shoalAlign + (cohY / nf - off[i].dy) * Const.shoalCohesion
             }
+            let dist = max(0.001, (off[i].dx * off[i].dx + off[i].dy * off[i].dy).squareRoot())   // round soft boundary: ease fish back inside the shoal radius instead of clamping to a square wall
+            if dist > range { let over = (dist - range) / range; ax -= off[i].dx / dist * over * Const.shoalEdgeForce; ay -= off[i].dy / dist * over * Const.shoalEdgeForce }
             off[i].vx += ax * dt; off[i].vy += ay * dt
             let spd = max(0.001, (off[i].vx * off[i].vx + off[i].vy * off[i].vy).squareRoot())
             let cl = clampD(spd, Const.shoalMinSpd, Const.shoalMaxSpd)
             off[i].vx = off[i].vx / spd * cl; off[i].vy = off[i].vy / spd * cl
             let avx = drift + off[i].vx; if abs(avx) > 4 { off[i].face = avx > 0 ? 1 : -1 }   // face the absolute direction of travel (drift + relative) — a fish drifting backward turns to face that way; hysteresis stops flicker near zero
-            off[i].dx = clampD(off[i].dx + off[i].vx * dt, -range, range)
-            off[i].dy = clampD(off[i].dy + off[i].vy * dt, -range, range)
+            off[i].dx += off[i].vx * dt; off[i].dy += off[i].vy * dt
         }
     }
 
@@ -362,7 +364,7 @@ final class Sim {
         }
         for item in kept {
             if let c = byName[item.name] {
-                c.mem = item.memMiB; c.count = item.count; c.sizes = item.sizes; c.cpuT = item.cpu; c.lastSeen = now
+                c.mem = item.memMiB; c.count = item.count; c.sizes = item.sizes; c.cpus = item.cpus; c.cpuT = item.cpu; c.lastSeen = now
                 let per = c.k.shape == .school ? Double(item.memMiB) / Double(max(1, item.count)) : Double(item.memMiB)
                 c.rT = radius(per, c.k.mul)
                 if c.state == "leaving" { c.state = "entering" }
@@ -496,12 +498,12 @@ final class Sim {
                 c.swimY = baseY + sin(c.t * 0.7 + c.bob) * amp
             }
             if c.k.shape == .school {
-                let rf = c.rDraw * Const.schoolFish
+                let rf = c.rDraw * Const.schoolFish, wb0 = Const.wiggleBase + c.k.spd * 4
                 updateBoids(&c.off, dt: dt, memberR: rf, drift: c.dir * spd * M)
-                let wb = Const.wiggleBase + c.k.spd * 4 + c.act * Const.wiggleCpu   // fish beat-rate before size scaling
-                for i in c.off.indices {   // independent tail beat: own phase offset + own size-based rate (small fish flick faster)
+                for i in c.off.indices {   // independent tail beat: own phase + own size-based rate + own process CPU (busy procs flick faster)
+                    let mAct = c.cpus.isEmpty ? c.act : clampD(c.cpus[i % c.cpus.count] / Const.cpuRef, 0, 1)
                     let mr = clampD(Const.wiggleSizeRef / max(rf * c.off[i].size, 1), Const.wiggleSizeMin, 1)
-                    c.off[i].wig = wiggleMode != "none" ? c.t * wb * mr + c.off[i].phase : 0
+                    c.off[i].wig = wiggleMode != "none" ? c.t * (wb0 + mAct * Const.wiggleCpu) * mr + c.off[i].phase : 0
                 }
             }
             if lift > 0 { c.swimY += (waterY - c.rDraw * 0.12 - c.swimY) * lift }   // ease up from the normal bob toward a surface breach and back

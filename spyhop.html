@@ -53,7 +53,7 @@
     bob: { fish: 16, school: 14, cpuBoost: 0.7, jellyDrift: 12, jellyRate: 0.35, jellySlow: 0.22 },   // jellyRate: bell/tentacle pulse rate; jellySlow: the (much slower, decoupled) vertical drift
     whale: { flipperK: 70 },                                    // flipper phase rate = flipperK * (1 + act) / rDraw — big whales flap lazily (~4s/beat near max size), small ones twitch faster
     radius: { base: 6, memK: 0.85, max: 58, schoolFish: 0.9 },
-    shoal: { sepK: 0.9, neighK: 2.1, sepForce: 650, align: 0.55, cohesion: 0.35, home: 0.1, maxSpd: 46, minSpd: 8, wander: 18, rangeK: 3.2 },   // boids tuning — sep spacing scales with each PAIR's real drawn size (small fish stay close); rangeK = shoal box (roomy so nobody pins to the wall)
+    shoal: { sepK: 0.9, neighK: 2.1, sepForce: 650, align: 0.55, cohesion: 0.35, home: 0.1, edgeForce: 800, maxSpd: 46, minSpd: 8, wander: 18, rangeK: 2.6 },   // boids: sep spacing scales with each PAIR's real drawn size; rangeK = round soft-boundary radius, edgeForce eases fish back inside it (no square hard-clamp -> no lining up on a wall)
     avoid: { gap: 0.72, push: 90, yBias: 1.0, slide: 1.8 },    // slide: strong tangential unstick so head-on pairs pass
     crab: { near: 1.7, boost: 2.8, decay: 0.9, crawl: 1, dirLock: 0.6 },   // near crabs: the larger scoots away; dirLock: min s before it may flip again
     label: { push: 0.45, crabPush: 1.0, charW: 6.4, decay: 0.82 },
@@ -243,12 +243,13 @@
       let ax = sepX * S.sepForce - oi.dx * S.home + (rand() - .5) * S.wander;
       let ay = sepY * S.sepForce - oi.dy * S.home + (rand() - .5) * S.wander;
       if (near) { ax += (alX / near - oi.vx) * S.align + (cohX / near - oi.dx) * S.cohesion; ay += (alY / near - oi.vy) * S.align + (cohY / near - oi.dy) * S.cohesion; }
+      const dist = Math.hypot(oi.dx, oi.dy) || .001;                                            // round soft boundary: ease fish back inside the shoal radius instead of clamping to a square wall
+      if (dist > range) { const over = (dist - range) / range; ax -= oi.dx / dist * over * S.edgeForce; ay -= oi.dy / dist * over * S.edgeForce; }
       oi.vx += ax * dt; oi.vy += ay * dt;
       const spd = Math.hypot(oi.vx, oi.vy) || .001, cl = clamp(spd, S.minSpd, S.maxSpd);
       oi.vx = oi.vx / spd * cl; oi.vy = oi.vy / spd * cl;
       const avx = drift + oi.vx; if (Math.abs(avx) > 4) oi.face = avx > 0 ? 1 : -1;   // face the absolute direction of travel (drift + relative) — a fish drifting backward turns to face that way; hysteresis stops flicker near zero
-      oi.dx = clamp(oi.dx + oi.vx * dt, -range, range);
-      oi.dy = clamp(oi.dy + oi.vy * dt, -range, range);
+      oi.dx += oi.vx * dt; oi.dy += oi.vy * dt;
     }
   }
 
@@ -290,7 +291,7 @@
       spy: 0, spyT: 0, spyRot: 0, spyWig: 0, spyLiftPrev: 0,
       labelOff: { x: 0, y: 0 }, labelHW: 0,
       arrive: present ? 1 : 0, state: present ? 'in' : 'entering', lastSeen: Date.now(),
-      off: schoolOffs(members), sizes: item.s || [],
+      off: schoolOffs(members), sizes: item.s || [], cpus: item.sc || [],
     };
     if (k.shape === 'school') fishSizes(c);
     if (present) c.r = c.rT;
@@ -303,7 +304,7 @@
         c.mem = item.m; c.count = item.c; c.cpuT = item.cpu || 0; c.lastSeen = Date.now();
         c.rT = radius(c.k.shape === 'school' ? item.m / Math.max(1, item.c) : item.m, c.k.mul);
         if (c.state === 'leaving') c.state = 'entering';
-        if (c.k.shape === 'school') { const w = clamp(item.c | 0, 2, 8); while (c.off.length < w) c.off.push(schoolOffs(1)[0]); c.off.length = Math.min(c.off.length, w); c.sizes = item.s || []; fishSizes(c); }
+        if (c.k.shape === 'school') { const w = clamp(item.c | 0, 2, 8); while (c.off.length < w) c.off.push(schoolOffs(1)[0]); c.off.length = Math.min(c.off.length, w); c.sizes = item.s || []; c.cpus = item.sc || []; fishSizes(c); }
       } else creatures.set(item.n, makeCreature(item, firstLoad));
     }
     firstLoad = false;
@@ -745,10 +746,12 @@
       else if (c.k.shape === 'crab') c.swimY = bedY + 22 - c.rDraw * .7;   // bottom edge at the seafloor trough
       else { const amp = (c.k.shape === 'school' ? CFG.bob.school : CFG.bob.fish) * M * (1 + c.act * CFG.bob.cpuBoost); c.swimY = baseY + Math.sin(c.t * .7 + c.bob) * amp; }
       if (c.k.shape === 'school') {
-        const rf = c.rDraw * CFG.radius.schoolFish, wb = CFG.wiggle.base + c.k.spd * 4 + c.act * CFG.wiggle.cpu;
+        const rf = c.rDraw * CFG.radius.schoolFish, wb0 = CFG.wiggle.base + c.k.spd * 4, cp = c.cpus;
         updateBoids(c.off, dt, rf, c.dir * spd * M);
-        for (const o of c.off)   // independent tail beat: each member has its own phase offset + its own size-based rate (small fish flick faster)
-          o.wig = WIG_MODE !== 'none' ? c.t * wb * clamp(CFG.wiggle.sizeRef / Math.max(rf * o.size, 1), CFG.wiggle.sizeMin, 1) + o.phase : 0;
+        for (let i = 0; i < c.off.length; i++) {   // independent tail beat: own phase + own size-based rate + own process CPU (busy procs flick faster)
+          const o = c.off[i], mAct = cp && cp.length ? clamp(cp[i % cp.length] / CFG.speed.cpuRef, 0, 1) : c.act;
+          o.wig = WIG_MODE !== 'none' ? c.t * (wb0 + mAct * CFG.wiggle.cpu) * clamp(CFG.wiggle.sizeRef / Math.max(rf * o.size, 1), CFG.wiggle.sizeMin, 1) + o.phase : 0;
+        }
       }
       if (lift > 0) c.swimY += (waterY - c.rDraw * .12 - c.swimY) * lift;   // ease up from the normal bob toward a surface breach and back
       c.avoidY *= CFG.ease.avoidDecay; c.labelOff.x *= CFG.label.decay; c.labelOff.y *= CFG.label.decay;
