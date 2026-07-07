@@ -19,6 +19,17 @@ struct Kind {
     var detail = "complex"   // resolved body-detail level for this kind ("simple" | "complex")
 }
 
+/// One fish in a school: offset from the shoal anchor, boids velocity, and per-member draw traits.
+struct SchoolMember {
+    var dx: Double, dy: Double        // offset from the shoal anchor
+    var vx = 0.0, vy = 0.0            // boids velocity (shoal-relative)
+    var pref: Double                  // spacing personality (0.8–1.3)
+    var face = 1.0                    // facing ±1
+    var size = 1.0                    // draw-radius multiplier (real process RSS)
+    var phase = 0.0                   // tail-wiggle phase offset — independent per member
+    var wig = 0.0                     // current wiggle phase (recomputed each frame from phase + size-based rate)
+}
+
 /// Mutable per-creature state (reference type — mutated in place across passes, like the JS object).
 final class Creature {
     let name: String
@@ -51,7 +62,7 @@ final class Creature {
     var arrive: Double          // 0..1 arrival progress
     var state: String           // entering | in | leaving
     var lastSeen: TimeInterval
-    var off: [(dx: Double, dy: Double, vx: Double, vy: Double, pref: Double, face: Double, size: Double)]  // school member offsets + boids velocity + spacing personality + facing + per-member size multiplier
+    var off: [SchoolMember]  // school members (empty for solo creatures)
 
     // Give each school member its real size: multiplier = radius(its RSS) / group-reference radius (rT),
     // mirrors spyhop.html fishSizes(). No sizes (old server) -> keep the random schoolOffs fallback.
@@ -62,7 +73,7 @@ final class Creature {
     }
 
     init(item: RosterEntry, kind: Kind, present: Bool, now: TimeInterval,
-         radius: (Double, Double?) -> Double, schoolOffs: (Int) -> [(Double, Double, Double, Double, Double, Double, Double)]) {
+         radius: (Double, Double?) -> Double, schoolOffs: (Int) -> [SchoolMember]) {
         name = item.name; mem = item.memMiB; count = item.count; sizes = item.sizes; k = kind
         let per = kind.shape == .school ? Double(item.memMiB) / Double(max(1, item.count)) : Double(item.memMiB)
         let members = kind.shape == .school ? min(8, max(2, item.count)) : 1
@@ -77,7 +88,7 @@ final class Creature {
         arrive = present ? 1 : 0
         state = present ? "in" : "entering"
         lastSeen = now
-        off = schoolOffs(members).map { ($0.0, $0.1, $0.2, $0.3, $0.4, $0.5, $0.6) }
+        off = schoolOffs(members)
         applyFishSizes(radius)
         if present { r = rT }
     }
@@ -117,9 +128,9 @@ enum Const {
     // radius
     static let radBase = 6.0, memK = 0.85, radMax = 58.0, schoolFish = 0.9
     // shoal (boids tuning for school members) — sepK/neighK scale with each member's actual drawn size
-    static let shoalSepK = 1.8, shoalNeighK = 2.1, shoalSepForce = 650.0
+    static let shoalSepK = 0.9, shoalNeighK = 2.1, shoalSepForce = 650.0   // sep spacing scales with each PAIR's real drawn size (small fish stay close)
     static let shoalAlign = 0.55, shoalCohesion = 0.35, shoalHome = 0.1, shoalMaxSpd = 46.0, shoalMinSpd = 8.0
-    static let shoalWander = 18.0, shoalRangeK = 2.6
+    static let shoalWander = 18.0, shoalRangeK = 3.2   // shoal box; roomy so nobody pins to the wall
     // avoid — gentle VERTICAL-only personal space (swimmers drift apart in depth to pass, never
     // shoved horizontally). Wide range (gap), cubic ramp so force builds slowly from ~0 at the
     // edge, and a low ceiling (avoidPush small). Diverges from the web's bidirectional push+slide.
@@ -256,13 +267,14 @@ final class Sim {
         min(Const.radMax, (Const.radBase + sqrt(max(1, mib)) * Const.memK) * (mul ?? 1))
     }
 
-    // last field (size) is a random fallback multiplier; applyFishSizes() overwrites it with the
-    // real per-process size when the server provides one (RosterEntry.sizes).
-    private func schoolOffs(_ n: Int) -> [(Double, Double, Double, Double, Double, Double, Double)] {
-        (0..<n).map { _ in ((Double.random(in: 0..<1) - 0.5) * 60,
-                            (Double.random(in: 0..<1) - 0.5) * 40, 0, 0,
-                            0.8 + Double.random(in: 0..<1) * 0.5, 1,
-                            0.55 + Double.random(in: 0..<1) * 0.9) }
+    // size is a random fallback multiplier; applyFishSizes() overwrites it with the real per-process
+    // size when the server provides one (RosterEntry.sizes). phase desyncs the tail wiggle per member.
+    private func schoolOffs(_ n: Int) -> [SchoolMember] {
+        (0..<n).map { _ in SchoolMember(dx: (Double.random(in: 0..<1) - 0.5) * 60,
+                                        dy: (Double.random(in: 0..<1) - 0.5) * 40,
+                                        pref: 0.8 + Double.random(in: 0..<1) * 0.5,
+                                        size: 0.55 + Double.random(in: 0..<1) * 0.9,
+                                        phase: Double.random(in: 0..<1) * .pi * 2) }
     }
 
     /// Boids: separation + alignment + cohesion, plus a gentle pull back toward the group's own
@@ -273,15 +285,16 @@ final class Sim {
     // drift = the whole shoal's horizontal velocity (c.dir*spd*M). A member's on-screen motion is
     // drift + its shoal-relative vx, so facing must key off that sum — otherwise a fish nudged toward
     // the back of a forward-drifting shoal faces backward while actually moving forward.
-    private func updateBoids(_ off: inout [(dx: Double, dy: Double, vx: Double, vy: Double, pref: Double, face: Double, size: Double)], dt: Double, memberR: Double, drift: Double) {
+    private func updateBoids(_ off: inout [SchoolMember], dt: Double, memberR: Double, drift: Double) {
         let n = off.count
-        let sepBase = memberR * Const.shoalSepK, neighBase = memberR * Const.shoalNeighK, range = neighBase * Const.shoalRangeK
+        let neighBase = memberR * Const.shoalNeighK, range = neighBase * Const.shoalRangeK
         for i in 0..<n {
-            let sep = sepBase * off[i].pref, neigh = neighBase * off[i].pref
+            let ri = memberR * off[i].size, neigh = neighBase * off[i].pref
             var sepX = 0.0, sepY = 0.0, alX = 0.0, alY = 0.0, cohX = 0.0, cohY = 0.0, near = 0
             for j in 0..<n where j != i {
                 let dx = off[i].dx - off[j].dx, dy = off[i].dy - off[j].dy
                 let d = max(0.001, (dx * dx + dy * dy).squareRoot())
+                let sep = (ri + memberR * off[j].size) * Const.shoalSepK * off[i].pref   // spacing = the two fish's real radii -> tiny fish crowd close, big fish keep room
                 if d < sep { let f = (sep - d) / sep; sepX += (dx / d) * f; sepY += (dy / d) * f }
                 if d < neigh { alX += off[j].vx; alY += off[j].vy; cohX += off[j].dx; cohY += off[j].dy; near += 1 }
             }
@@ -296,6 +309,7 @@ final class Sim {
             let spd = max(0.001, (off[i].vx * off[i].vx + off[i].vy * off[i].vy).squareRoot())
             let cl = clampD(spd, Const.shoalMinSpd, Const.shoalMaxSpd)
             off[i].vx = off[i].vx / spd * cl; off[i].vy = off[i].vy / spd * cl
+            if drift > 0 && off[i].vx < -drift { off[i].vx = -drift } else if drift < 0 && off[i].vx > -drift { off[i].vx = -drift }   // never translate backward through the shoal
             let avx = drift + off[i].vx; if abs(avx) > 4 { off[i].face = avx > 0 ? 1 : -1 }   // face absolute direction of travel (drift + relative); hysteresis so it doesn't flicker near zero
             off[i].dx = clampD(off[i].dx + off[i].vx * dt, -range, range)
             off[i].dy = clampD(off[i].dy + off[i].vy * dt, -range, range)
@@ -482,7 +496,15 @@ final class Sim {
                 let amp = (c.k.shape == .school ? Const.bobSchool : Const.bobFish) * M * (1 + c.act * Const.bobCpuBoost)
                 c.swimY = baseY + sin(c.t * 0.7 + c.bob) * amp
             }
-            if c.k.shape == .school { updateBoids(&c.off, dt: dt, memberR: c.rDraw * Const.schoolFish, drift: c.dir * spd * M) }
+            if c.k.shape == .school {
+                let rf = c.rDraw * Const.schoolFish
+                updateBoids(&c.off, dt: dt, memberR: rf, drift: c.dir * spd * M)
+                let wb = Const.wiggleBase + c.k.spd * 4 + c.act * Const.wiggleCpu   // fish beat-rate before size scaling
+                for i in c.off.indices {   // independent tail beat: own phase offset + own size-based rate (small fish flick faster)
+                    let mr = clampD(Const.wiggleSizeRef / max(rf * c.off[i].size, 1), Const.wiggleSizeMin, 1)
+                    c.off[i].wig = wiggleMode != "none" ? c.t * wb * mr + c.off[i].phase : 0
+                }
+            }
             if lift > 0 { c.swimY += (waterY - c.rDraw * 0.12 - c.swimY) * lift }   // ease up from the normal bob toward a surface breach and back
             c.avoidY *= Const.avoidDecay
             c.labelOffX *= Const.labelDecay

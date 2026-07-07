@@ -220,7 +220,7 @@ final class OceanScene: SKScene {
                 syncSchool(c)
             } else {
                 let node = nodes[c.name] ?? makeNode(for: c)
-                let phase = wigPhase(c)
+                let phase = wigPhase(c.wig)
                 let bkt = ShapeBaker.sizeBucket(CGFloat(c.rT))   // bake sharpness follows the creature's target size
                 let key = "\(c.k.shape.rawValue)\(phase)|\(c.k.detail)|\(Int(bkt))"
                 if nodeKey[c.name] != key {   // shape, wiggle phase, or size bucket changed → swap the (cached) texture
@@ -250,8 +250,7 @@ final class OceanScene: SKScene {
     }
 
     private func syncSchool(_ c: Creature) {
-        let maxSize = c.off.map { $0.size }.max() ?? 1   // one texture per school, baked sharp enough for its largest member
-        let tex = ShapeBaker.texture(.fish, c.k, phase: wigPhase(c), sizeR: CGFloat(c.rT) * Const.schoolFish * CGFloat(maxSize), scale: view?.window?.backingScaleFactor ?? 2)
+        let scale = view?.window?.backingScaleFactor ?? 2
         // Two nodes per member: a primary and a wrap-around ghost. The ghost lets a member cross the
         // screen edge seamlessly — it appears on the far side exactly as the primary leaves this one —
         // so a school straddles the boundary (half on each side) instead of teleporting as one unit.
@@ -272,6 +271,7 @@ final class OceanScene: SKScene {
             var mx = CGFloat(c.x + o.dx).truncatingRemainder(dividingBy: W)   // wrap each fish's own x independently
             if mx < 0 { mx += W }
             let y = CGFloat(sim.H - (my0 + o.dy))
+            let tex = ShapeBaker.texture(.fish, c.k, phase: wigPhase(o.wig), sizeR: CGFloat(c.rT) * Const.schoolFish * CGFloat(o.size), scale: scale)   // per-member wiggle phase + size
             for n in [prim, ghost] {
                 n.texture = tex
                 n.xScale = ms * CGFloat(o.face * c.turn); n.yScale = ms * CGFloat(c.turnY)
@@ -297,9 +297,9 @@ final class OceanScene: SKScene {
         return 0
     }
 
-    private func wigPhase(_ c: Creature) -> Int {
+    private func wigPhase(_ wig: Double) -> Int {
         let tau = Double.pi * 2
-        let w = (c.wig.truncatingRemainder(dividingBy: tau) + tau).truncatingRemainder(dividingBy: tau)
+        let w = (wig.truncatingRemainder(dividingBy: tau) + tau).truncatingRemainder(dividingBy: tau)
         return Int(w / tau * Double(ShapeBaker.phases)) % ShapeBaker.phases
     }
 
