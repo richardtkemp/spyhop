@@ -218,8 +218,53 @@ def _script_token(toks):
     return None
 
 
+# --- container labels: name a containerised process by its compose service (e.g. "huntarr") rather
+# than its in-container comm ("main"). All processes in a container fold into one creature. ---
+_cont_map, _cont_map_t = {}, 0.0
+_CID_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def _refresh_container_map():
+    """Cache {full container id -> compose service name}, refreshed on the docker cadence.
+    If docker is unavailable the map stays empty and every process falls back to its ps name."""
+    global _cont_map, _cont_map_t
+    now = time.monotonic()
+    if _cont_map_t and now - _cont_map_t < SLOW_TTL:
+        return
+    _cont_map_t = now
+    try:
+        out = subprocess.run(
+            ["docker", "ps", "--no-trunc", "--format",
+             '{{.ID}}\t{{.Label "com.docker.compose.service"}}'],
+            capture_output=True, text=True, timeout=4).stdout
+        m = {}
+        for line in out.splitlines():
+            cid, _, svc = line.partition("\t")
+            if cid and svc:
+                m[cid] = svc
+        _cont_map = m
+    except Exception:
+        pass
+
+
+def _pid_service(pid):
+    """Compose service name for a pid's container, or None if not in a labelled container."""
+    if not _cont_map:
+        return None
+    try:
+        with open(f"/proc/{pid}/cgroup") as f:
+            cg = f.read()
+    except OSError:
+        return None
+    m = _CID_RE.search(cg)
+    return _cont_map.get(m.group(0)) if m else None
+
+
 def display_name(comm, pid):
     """Best human name for a process; None for kernel threads we don't surface."""
+    svc = _pid_service(pid)
+    if svc:
+        return svc                                    # containerised -> clean compose service name
     name0 = comm.rstrip(":").strip()
     if name0.startswith("kworker"):
         return "kworker"                              # fold the swarm of kernel workers into one shoal
@@ -369,6 +414,7 @@ def process_groups():
     """Aggregate by command name: [rss_kb, count, cpu_max%, [(rss_kb, cpu%) per process]]."""
     global _prev_procs, _prev_procs_t
     now = time.monotonic()
+    _refresh_container_map()
     procs = _sample_procs()
     dt, prev = (now - _prev_procs_t) if _prev_procs_t else 0, _prev_procs
     agg = {}
