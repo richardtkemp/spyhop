@@ -25,10 +25,12 @@ State contract:
   cpu (host busy%), memPct, swapPct              # cpu/mem/swap gauges
   alarms (count), alerts [{n,s,v,u}]             # raised netdata alarms
   containers
-  roster [{n, m(MiB), c(count), cpu(max % of one core in the group)}]
+  roster [{n, m(MiB), c(count), cpu(max % of one core in the group), s[MiB per proc]}]
       -> the set of process-groups that together make up TOP_FRAC of total RSS
          OR total CPU (union), plus every "always-show" named creature present.
          Selection is eager here; the client defers removals.
+         s is the largest SCHOOL_MAX individual RSS values (desc) so the client can
+         size each fish in a school by its real process, not the group mean.
 """
 import glob, json, os, re, subprocess, threading, time, urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -43,6 +45,7 @@ TOP_FRAC   = 0.80            # keep the set covering this fraction of RSS / CPU
 MIN_GROUPS = 15              # always show at least this many (pad from next-largest by RSS)
 MAX_GROUPS = 40              # never show more than this (keep always-show creatures + largest);
                             # clients may cap lower locally (the mac app has a "Max creatures" menu)
+SCHOOL_MAX = 8              # a school draws at most this many fish -> send this many real RSS sizes
 STATE_TTL  = 2.0            # seconds; one real compute shared across viewers
 SLOW_TTL   = 8.0            # seconds; docker + netdata refresh cadence
 # ---------- creature config ----------
@@ -360,7 +363,7 @@ def _sample_procs():
 
 
 def process_groups():
-    """Aggregate by command name: [rss_kb, count, cpu_max%]."""
+    """Aggregate by command name: [rss_kb, count, cpu_max%, [rss_kb per process]]."""
     global _prev_procs, _prev_procs_t
     now = time.monotonic()
     procs = _sample_procs()
@@ -373,8 +376,8 @@ def process_groups():
         cpu = 0.0
         if dt > 0 and pid in prev and jif > prev[pid]:
             cpu = (jif - prev[pid]) / CLK_TCK / dt * 100
-        a = agg.setdefault(name, [0, 0, 0.0])
-        a[0] += rss; a[1] += 1; a[2] = max(a[2], cpu)
+        a = agg.setdefault(name, [0, 0, 0.0, []])
+        a[0] += rss; a[1] += 1; a[2] = max(a[2], cpu); a[3].append(rss)
     _prev_procs = {pid: v[2] for pid, v in procs.items()}
     _prev_procs_t = now
     return agg
@@ -394,8 +397,9 @@ def _cover(items, key):
 
 
 def roster():
-    groups = sorted(({"n": n, "m": kb // 1024, "c": c, "cpu": round(cpu, 1)}
-                     for n, (kb, c, cpu) in process_groups().items()),
+    groups = sorted(({"n": n, "m": kb // 1024, "c": c, "cpu": round(cpu, 1),
+                      "s": [r // 1024 for r in sorted(sizes, reverse=True)[:SCHOOL_MAX]]}
+                     for n, (kb, c, cpu, sizes) in process_groups().items()),
                     key=lambda g: -g["m"])
     always = {g["n"] for g in groups if ALWAYS_RE.search(g["n"])}
     keep = _cover(groups, lambda g: g["m"]) | _cover(groups, lambda g: g["cpu"]) | always

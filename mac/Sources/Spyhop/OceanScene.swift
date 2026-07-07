@@ -250,23 +250,37 @@ final class OceanScene: SKScene {
     }
 
     private func syncSchool(_ c: Creature) {
-        let tex = ShapeBaker.texture(.fish, c.k, phase: wigPhase(c), sizeR: CGFloat(c.rT) * Const.schoolFish, scale: view?.window?.backingScaleFactor ?? 2)
+        let maxSize = c.off.map { $0.size }.max() ?? 1   // one texture per school, baked sharp enough for its largest member
+        let tex = ShapeBaker.texture(.fish, c.k, phase: wigPhase(c), sizeR: CGFloat(c.rT) * Const.schoolFish * CGFloat(maxSize), scale: view?.window?.backingScaleFactor ?? 2)
+        // Two nodes per member: a primary and a wrap-around ghost. The ghost lets a member cross the
+        // screen edge seamlessly — it appears on the far side exactly as the primary leaves this one —
+        // so a school straddles the boundary (half on each side) instead of teleporting as one unit.
         var members = schoolNodes[c.name] ?? []
-        while members.count < c.off.count {
+        let want = c.off.count * 2
+        while members.count < want {
             let n = SKSpriteNode(); n.size = CGSize(width: ShapeBaker.nativeSize, height: ShapeBaker.nativeSize)
             creatureLayer.addChild(n); members.append(n)
         }
-        while members.count > c.off.count { members.removeLast().removeFromParent() }
+        while members.count > want { members.removeLast().removeFromParent() }
         schoolNodes[c.name] = members
         let s = CGFloat(c.rDraw * Const.schoolFish) / refR
-        for (i, n) in members.enumerated() {
-            let o = c.off[i]
-            n.texture = tex
-            let mx = c.x + o.dx
-            let my = c.swimY + c.avoidY + o.dy
-            n.position = CGPoint(x: CGFloat(mx), y: CGFloat(sim.H - my))
-            n.xScale = s * CGFloat(o.face * c.turn); n.yScale = s * CGFloat(c.turnY); n.alpha = CGFloat(c.alpha)
-            n.zPosition = CGFloat(c.frac)
+        let W = CGFloat(sim.W), my0 = c.swimY + c.avoidY
+        for (i, o) in c.off.enumerated() {
+            let prim = members[2 * i], ghost = members[2 * i + 1]
+            let ms = s * CGFloat(o.size)   // per-member size from its real process RSS
+            let halfW = ms * ShapeBaker.nativeSize / 2
+            var mx = CGFloat(c.x + o.dx).truncatingRemainder(dividingBy: W)   // wrap each fish's own x independently
+            if mx < 0 { mx += W }
+            let y = CGFloat(sim.H - (my0 + o.dy))
+            for n in [prim, ghost] {
+                n.texture = tex
+                n.xScale = ms * CGFloat(o.face * c.turn); n.yScale = ms * CGFloat(c.turnY)
+                n.alpha = CGFloat(c.alpha); n.zPosition = CGFloat(c.frac)
+            }
+            prim.position = CGPoint(x: mx, y: y)
+            if mx - halfW < 0 { ghost.position = CGPoint(x: mx + W, y: y); ghost.isHidden = false }        // straddles left edge → mirror on the right
+            else if mx + halfW > W { ghost.position = CGPoint(x: mx - W, y: y); ghost.isHidden = false }   // straddles right edge → mirror on the left
+            else { ghost.isHidden = true }
         }
     }
 

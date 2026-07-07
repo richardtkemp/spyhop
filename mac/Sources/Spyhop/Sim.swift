@@ -24,6 +24,7 @@ final class Creature {
     let name: String
     var mem: Int
     var count: Int
+    var sizes: [Int]            // real RSS (MiB) per process, for sizing individual school members
     var k: Kind
     let frac: Double            // resting vertical position within [band.lo, band.hi]
     var r = 0.0, rT: Double     // eased radius / target
@@ -50,11 +51,19 @@ final class Creature {
     var arrive: Double          // 0..1 arrival progress
     var state: String           // entering | in | leaving
     var lastSeen: TimeInterval
-    var off: [(dx: Double, dy: Double, vx: Double, vy: Double, pref: Double, face: Double)]  // school member offsets + boids velocity + spacing personality + facing
+    var off: [(dx: Double, dy: Double, vx: Double, vy: Double, pref: Double, face: Double, size: Double)]  // school member offsets + boids velocity + spacing personality + facing + per-member size multiplier
+
+    // Give each school member its real size: multiplier = radius(its RSS) / group-reference radius (rT),
+    // mirrors spyhop.html fishSizes(). No sizes (old server) -> keep the random schoolOffs fallback.
+    func applyFishSizes(_ radius: (Double, Double?) -> Double) {
+        guard k.shape == .school, !sizes.isEmpty else { return }
+        let ref = rT > 0 ? rT : 1
+        for i in off.indices { off[i].size = radius(Double(sizes[i % sizes.count]), k.mul) / ref }
+    }
 
     init(item: RosterEntry, kind: Kind, present: Bool, now: TimeInterval,
-         radius: (Double, Double?) -> Double, schoolOffs: (Int) -> [(Double, Double, Double, Double, Double, Double)]) {
-        name = item.name; mem = item.memMiB; count = item.count; k = kind
+         radius: (Double, Double?) -> Double, schoolOffs: (Int) -> [(Double, Double, Double, Double, Double, Double, Double)]) {
+        name = item.name; mem = item.memMiB; count = item.count; sizes = item.sizes; k = kind
         let per = kind.shape == .school ? Double(item.memMiB) / Double(max(1, item.count)) : Double(item.memMiB)
         let members = kind.shape == .school ? min(8, max(2, item.count)) : 1
         frac = kind.band.lo + Double.random(in: 0..<1) * (kind.band.hi - kind.band.lo)
@@ -68,7 +77,8 @@ final class Creature {
         arrive = present ? 1 : 0
         state = present ? "in" : "entering"
         lastSeen = now
-        off = schoolOffs(members).map { ($0.0, $0.1, $0.2, $0.3, $0.4, $0.5) }
+        off = schoolOffs(members).map { ($0.0, $0.1, $0.2, $0.3, $0.4, $0.5, $0.6) }
+        applyFishSizes(radius)
         if present { r = rT }
     }
 }
@@ -246,10 +256,13 @@ final class Sim {
         min(Const.radMax, (Const.radBase + sqrt(max(1, mib)) * Const.memK) * (mul ?? 1))
     }
 
-    private func schoolOffs(_ n: Int) -> [(Double, Double, Double, Double, Double, Double)] {
+    // last field (size) is a random fallback multiplier; applyFishSizes() overwrites it with the
+    // real per-process size when the server provides one (RosterEntry.sizes).
+    private func schoolOffs(_ n: Int) -> [(Double, Double, Double, Double, Double, Double, Double)] {
         (0..<n).map { _ in ((Double.random(in: 0..<1) - 0.5) * 60,
                             (Double.random(in: 0..<1) - 0.5) * 40, 0, 0,
-                            0.8 + Double.random(in: 0..<1) * 0.5, 1) }
+                            0.8 + Double.random(in: 0..<1) * 0.5, 1,
+                            0.55 + Double.random(in: 0..<1) * 0.9) }
     }
 
     /// Boids: separation + alignment + cohesion, plus a gentle pull back toward the group's own
@@ -257,7 +270,7 @@ final class Sim {
     /// school's own members only (n ≤ 8), never against other creatures — trivial per frame.
     /// sep/neigh scale with the member's actual on-screen radius (bigger fish keep more distance)
     /// and each member's own `pref` personality, so the spacing isn't a uniform crystal-grid.
-    private func updateBoids(_ off: inout [(dx: Double, dy: Double, vx: Double, vy: Double, pref: Double, face: Double)], dt: Double, memberR: Double) {
+    private func updateBoids(_ off: inout [(dx: Double, dy: Double, vx: Double, vy: Double, pref: Double, face: Double, size: Double)], dt: Double, memberR: Double) {
         let n = off.count
         let sepBase = memberR * Const.shoalSepK, neighBase = memberR * Const.shoalNeighK, range = neighBase * Const.shoalRangeK
         for i in 0..<n {
@@ -333,7 +346,7 @@ final class Sim {
         }
         for item in kept {
             if let c = byName[item.name] {
-                c.mem = item.memMiB; c.count = item.count; c.cpuT = item.cpu; c.lastSeen = now
+                c.mem = item.memMiB; c.count = item.count; c.sizes = item.sizes; c.cpuT = item.cpu; c.lastSeen = now
                 let per = c.k.shape == .school ? Double(item.memMiB) / Double(max(1, item.count)) : Double(item.memMiB)
                 c.rT = radius(per, c.k.mul)
                 if c.state == "leaving" { c.state = "entering" }
@@ -341,6 +354,7 @@ final class Sim {
                     let w = min(8, max(2, item.count))
                     while c.off.count < w { c.off.append(schoolOffs(1)[0]) }
                     if c.off.count > w { c.off.removeLast(c.off.count - w) }
+                    c.applyFishSizes(radius)
                 }
             } else {
                 let c = Creature(item: item, kind: kindOf(item.name), present: firstLoad, now: now,
@@ -448,8 +462,15 @@ final class Sim {
             let spd = base * c.person * arrE * edgeB * (1 + c.boost) * (1 - Const.spySlow * lift)   // near-stationary while spyhopping
             c.t += dt
             c.x += c.dir * spd * dt * M
-            let marg = c.rDraw + 8
-            if c.x > W + marg { c.x = -marg } else if c.x < -marg { c.x = W + marg }
+            if c.k.shape == .school {
+                // Schools wrap per-member at render time (see OceanScene.syncSchool), so members can
+                // straddle the edge — half on each side. Keep the anchor on a clean [0,W) torus so its
+                // own wrap is an exact-W jump the render modulo absorbs seamlessly (no whole-school pop).
+                if c.x >= W { c.x -= W } else if c.x < 0 { c.x += W }
+            } else {
+                let marg = c.rDraw + 8
+                if c.x > W + marg { c.x = -marg } else if c.x < -marg { c.x = W + marg }
+            }
             let baseY = waterY + c.frac * (bedY - waterY)
             switch c.k.shape {
             case .jelly: c.swimY = baseY + sin(c.t * Const.jellySlow + c.bob) * Const.jellyDrift * M   // slow, smooth drift — decoupled from the (activity-driven) tentacle pulse

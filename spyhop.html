@@ -207,7 +207,17 @@
   function dot(x, y, r, fill) { ctx.fillStyle = fill; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill(); }
   function glow(r, k) { const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r); g.addColorStop(0, col(k, 12, .95)); g.addColorStop(.55, col(k, 0, .5)); g.addColorStop(1, col(k, -8, 0)); return g; }
   const radius = (mib, mul) => Math.min(CFG.radius.max, (CFG.radius.base + Math.sqrt(Math.max(1, mib)) * CFG.radius.memK) * (mul || 1));
-  const schoolOffs = n => Array.from({ length: n }, () => ({ dx: (rand() - .5) * 60, dy: (rand() - .5) * 40, vx: 0, vy: 0, pref: .8 + rand() * .5, face: 1 }));
+  // size: per-member visual-radius multiplier. fishSizes() sets it from the server's real per-process
+  // RSS (item.s); the random default here is only a fallback for an old server that omits sizes.
+  const schoolOffs = n => Array.from({ length: n }, () => ({ dx: (rand() - .5) * 60, dy: (rand() - .5) * 40, vx: 0, vy: 0, pref: .8 + rand() * .5, face: 1, size: .55 + rand() * .9 }));
+  // Give each school member its real size: multiplier = radius(its RSS) / group-reference radius (rT),
+  // so member draw radius rDraw*schoolFish*size tracks the true per-process size. No item.s (old
+  // server) -> leave the random schoolOffs sizes so the shoal still varies.
+  function fishSizes(c) {
+    const s = c.sizes; if (!s || !s.length) return;
+    const ref = c.rT || 1;
+    for (let i = 0; i < c.off.length; i++) c.off[i].size = radius(s[i % s.length], c.k.mul) / ref;
+  }
 
   // Boids: separation + alignment + cohesion, plus a gentle pull back toward the group's own
   // anchor point (so the shoal doesn't drift away from its label/position). O(n²) over the
@@ -276,8 +286,9 @@
       spy: 0, spyT: 0, spyRot: 0, spyWig: 0, spyLiftPrev: 0,
       labelOff: { x: 0, y: 0 }, labelHW: 0,
       arrive: present ? 1 : 0, state: present ? 'in' : 'entering', lastSeen: Date.now(),
-      off: schoolOffs(members),
+      off: schoolOffs(members), sizes: item.s || [],
     };
+    if (k.shape === 'school') fishSizes(c);
     if (present) c.r = c.rT;
     return c;
   }
@@ -288,7 +299,7 @@
         c.mem = item.m; c.count = item.c; c.cpuT = item.cpu || 0; c.lastSeen = Date.now();
         c.rT = radius(c.k.shape === 'school' ? item.m / Math.max(1, item.c) : item.m, c.k.mul);
         if (c.state === 'leaving') c.state = 'entering';
-        if (c.k.shape === 'school') { const w = clamp(item.c | 0, 2, 8); while (c.off.length < w) c.off.push(schoolOffs(1)[0]); c.off.length = Math.min(c.off.length, w); }
+        if (c.k.shape === 'school') { const w = clamp(item.c | 0, 2, 8); while (c.off.length < w) c.off.push(schoolOffs(1)[0]); c.off.length = Math.min(c.off.length, w); c.sizes = item.s || []; fishSizes(c); }
       } else creatures.set(item.n, makeCreature(item, firstLoad));
     }
     firstLoad = false;
@@ -335,14 +346,18 @@
     _spriteBytes += oc.width * oc.height * 4;
     return { canvas: oc, half, side };
   }
-  function blitFish(c, x, y, r) {
-    const rB = Math.max(4, Math.round(r));
+  // rBake (default r) bakes the sprite at a chosen radius; the member is then drawn scaled to r.
+  // Schools pass the largest member's radius as rBake so a school bakes one sprite (sized to its
+  // biggest fish) and scales it down for smaller members, instead of one bake per distinct size.
+  function blitFish(c, x, y, r, rBake) {
+    const rB = Math.max(4, Math.round(rBake || r));
     const pi = Math.floor((((c.wig % TAU) + TAU) % TAU) / TAU * SPRITE_PHASES) % SPRITE_PHASES;
     const key = c.k.hue + ',' + c.k.sat + ',' + c.k.lit + '|' + rB + '|' + pi;
     let sp = _sprites.get(key);
     if (!sp) { sp = bakeFish(c.k, rB, pi); _sprites.set(key, sp); }
+    const sc = r / rB;
     ctx.save(); ctx.globalAlpha = c.alpha; ctx.translate(x, y); ctx.scale(c.dir * c.turn, c.turnY);
-    ctx.drawImage(sp.canvas, -sp.half, -sp.half, sp.side, sp.side); ctx.restore();
+    ctx.drawImage(sp.canvas, -sp.half * sc, -sp.half * sc, sp.side * sc, sp.side * sc); ctx.restore();
   }
   function drawWhale(c, x, y, r) {
     begin(c, x, y); if (c.spyRot) ctx.rotate(c.spyRot);                              // tilt nose-up while spyhopping
@@ -718,7 +733,9 @@
       if (c.k.shape === 'crab') base = Math.max(base, CFG.crab.crawl);            // steady crawl so crabs traverse & wrap
       const spd = base * c.person * arrE * edgeB * (1 + c.boost) * (1 - SPY.slow * lift);   // near-stationary while spyhopping
       c.t += dt; c.x += c.dir * spd * dt * M;
-      const marg = c.rDraw + 8; if (c.x > W + marg) c.x = -marg; else if (c.x < -marg) c.x = W + marg;   // wrap as soon as fully offscreen, so they re-enter promptly
+      if (c.k.shape === 'school') {          // schools wrap per-member at draw time (half on each side); keep the anchor on a clean [0,W) torus so its jump is an exact W the draw modulo absorbs
+        if (c.x >= W) c.x -= W; else if (c.x < 0) c.x += W;
+      } else { const marg = c.rDraw + 8; if (c.x > W + marg) c.x = -marg; else if (c.x < -marg) c.x = W + marg; }   // solo: wrap as soon as fully offscreen, so they re-enter promptly
       const baseY = waterY + c.frac * (bedY - waterY);
       if (c.k.shape === 'jelly') c.swimY = baseY + Math.sin(c.t * CFG.bob.jellySlow + c.bob) * CFG.bob.jellyDrift * M;   // slow, smooth drift — decoupled from the (activity-driven) tentacle pulse
       else if (c.k.shape === 'crab') c.swimY = bedY + 22 - c.rDraw * .7;   // bottom edge at the seafloor trough
@@ -774,7 +791,18 @@
       else if (k === 'ray') drawRay(c, c.x, y, r);
       else if (k === 'angler') drawAngler(c, c.x, y, r, clock);
       else if (k === 'crab') drawCrab(c, c.x, y, r);
-      else if (k === 'school') { const fn = SPRITE_PHASES ? blitFish : drawFish; for (const o of c.off) fn(o.face === c.dir ? c : { ...c, dir: o.face }, c.x + o.dx, y + o.dy, r * CFG.radius.schoolFish); }
+      else if (k === 'school') {
+        const rf = r * CFG.radius.schoolFish;
+        let mxSize = 0; for (const o of c.off) if (o.size > mxSize) mxSize = o.size;   // bake at the largest member
+        for (const o of c.off) {
+          const m = o.face === c.dir ? c : { ...c, dir: o.face }, sz = rf * o.size, halfW = sz * 1.6, oy = y + o.dy;
+          let ox = (c.x + o.dx) % W; if (ox < 0) ox += W;   // wrap each fish's own x independently -> the school can straddle the edge
+          const put = px => SPRITE_PHASES ? blitFish(m, px, oy, sz, rf * mxSize) : drawFish(m, px, oy, sz);
+          put(ox);
+          if (ox - halfW < 0) put(ox + W);            // straddles left edge -> draw a ghost entering from the right
+          else if (ox + halfW > W) put(ox - W);       // straddles right edge -> draw a ghost entering from the left
+        }
+      }
       else (SPRITE_PHASES ? blitFish : drawFish)(c, c.x, y, r);
       ctx.globalAlpha = 1;
       if (showLabels || hov === c) label(hov === c ? `${c.labelName} · ${c.mem} MiB` : c.labelName, c.x + c.labelOff.x, y - r - (k === 'whale' ? r * .5 : 8) + c.labelOff.y, hov === c);

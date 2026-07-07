@@ -67,7 +67,8 @@ struct Alert: Decodable {
 
 struct RosterEntry: Decodable {
     let name: String, memMiB: Int, count: Int, cpu: Double
-    enum CodingKeys: String, CodingKey { case name = "n", memMiB = "m", count = "c", cpu }
+    var sizes: [Int] = []   // real RSS (MiB, desc) per process in the group; empty from an old server
+    enum CodingKeys: String, CodingKey { case name = "n", memMiB = "m", count = "c", cpu, sizes = "s" }
 }
 
 struct State: Decodable {
