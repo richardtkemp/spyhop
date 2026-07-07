@@ -25,7 +25,8 @@ State contract:
   cpu (host busy%), memPct, swapPct              # cpu/mem/swap gauges
   alarms (count), alerts [{n,s,v,u}]             # raised netdata alarms
   containers
-  roster [{n, m(MiB), c(count), cpu(max % of one core in the group), s[MiB per proc], sc[cpu% per proc]}]
+  roster [{n, m(MiB), c(count), cpu(max % of one core in the group), s[MiB per proc], sc[cpu% per proc],
+           shape(optional: server-forced creature shape, to fill an otherwise-missing kind on-screen)}]
       -> the set of process-groups that together make up TOP_FRAC of total RSS
          OR total CPU (union), plus every "always-show" named creature present.
          Selection is eager here; the client defers removals.
@@ -65,10 +66,13 @@ DEFAULT_CREATURES = [
     {"match": "opencode",        "shape": "squid",  "hue": 32,  "sat": 88, "lit": 62, "spd": 0.70, "band": [.30, .60], "always": True},
     {"match": "foci",            "shape": "ray",    "hue": 250, "sat": 44, "lit": 62, "spd": 0.50, "band": [.55, .82], "always": True},
     {"match": "firefox",         "shape": "fish",   "hue": 24,  "sat": 88, "lit": 60, "spd": 0.70, "band": [.32, .58], "mul": 1.15, "always": True},
-    {"match": "claude",          "shape": "school", "hue": 172, "sat": 70, "lit": 63, "spd": 0.95, "band": [.28, .52], "always": True},
-    {"match": "^kworker$",       "shape": "school", "hue": 210, "sat": 12, "lit": 55, "spd": 0.70, "band": [.40, .72], "always": True},
     {"match": "pihole",          "shape": "fish",   "hue": 2,   "sat": 78, "lit": 60, "spd": 0.80, "band": [.40, .62], "always": True},
-    {"match": "radarr|sonarr|prowlarr|qbittorrent|jackett|lidarr|readarr|bazarr",
+    # the *arr / Servarr media-automation family (+ common companions) -> seabed crabs. Client auto-shoals
+    # only *unshaped* groups, so anything matched here stays a crab regardless of process count.
+    {"match": ("radarr|sonarr|lidarr|readarr|prowlar|whisparr|bazarr|mylar|jackett|nzbhydra|huntarr|"
+               "cleanuparr|recyclarr|unpackerr|notifiarr|autobrr|configarr|checkrr|requestrr|doplarr|"
+               "maintainerr|decluttarr|watchlistarr|buildarr|tdarr|posterr|wizarr|traktarr|flaresolverr|"
+               "overseerr|jellyseerr|qbittorrent"),
                                  "shape": "crab",   "hue": 16,  "sat": 82, "lit": 56, "spd": 0.50, "band": [.93, .98], "always": True},
     {"match": "home|python",       "shape": "fish", "hue": 128, "sat": 55, "lit": 58, "spd": 0.60, "band": [.55, .75]},
     {"match": "docker|containerd", "shape": "fish", "hue": 208, "sat": 48, "lit": 56, "spd": 0.50, "band": [.62, .82]},
@@ -222,6 +226,9 @@ def _script_token(toks):
 # than its in-container comm ("main"). All processes in a container fold into one creature. ---
 _cont_map, _cont_map_t = {}, 0.0
 _CID_RE = re.compile(r"[0-9a-f]{64}")
+# Docker's own host-side plumbing (daemon, runtime, per-container shims, port proxies) -> one "docker"
+# creature. These live in system.slice, not a container, so _pid_service returns None and they reach here.
+_DOCKER_INFRA = re.compile(r"(?i)^(dockerd|containerd(-shim.*)?|docker-proxy|runc)$")
 
 
 def _refresh_container_map():
@@ -266,8 +273,10 @@ def display_name(comm, pid):
     if svc:
         return svc                                    # containerised -> clean compose service name
     name0 = comm.rstrip(":").strip()
+    if _DOCKER_INFRA.match(name0):
+        return "docker"                               # daemon/runtime/shims/proxies -> one "docker" creature
     if name0.startswith("kworker"):
-        return "kworker"                              # fold the swarm of kernel workers into one shoal
+        return "kworker"                              # fold the swarm of kernel workers into one group
     try:
         raw = open(f"/proc/{pid}/cmdline", "rb").read()
     except OSError:
@@ -452,6 +461,61 @@ def _cover(items, key):
     return keep
 
 
+# --- coverage fill: guarantee at least one of every creature shape on-screen ---
+# When a shape isn't produced naturally (e.g. no qemu -> no whale), promote the best-fitting process
+# from the unassigned pool (plain default-fish) to that shape. Metric per shape matches its character;
+# sticky so a fill holds while it's on-screen and doesn't flip its whole body as RSS/CPU jitter.
+_SHAPE_RULES = [(re.compile(c["match"], re.I), c.get("shape", "fish")) for c in CREATURES if c.get("match")]
+SHOAL_MIN_COUNT, SHOAL_MIN_MEAN = 6, 15                       # mirror the client's auto-shoal test
+FILL_SHAPES = ["whale", "squid", "jelly", "crab", "school", "ray", "angler"]   # fillable, priority order
+_fill_map = {}                                               # shape -> name currently filling it (sticky)
+
+
+def _matched_shape(name):
+    for rx, sh in _SHAPE_RULES:
+        if rx.search(name):
+            return sh
+    return None
+
+
+def _is_pool(g):                                            # plain default fish: no rule, not auto-shoaled
+    return _matched_shape(g["n"]) is None and \
+        not (g["c"] > SHOAL_MIN_COUNT and g["m"] / max(1, g["c"]) > SHOAL_MIN_MEAN)
+
+
+def _eff_shape(g):
+    sh = _matched_shape(g["n"])
+    if sh:
+        return sh
+    return "school" if (g["c"] > SHOAL_MIN_COUNT and g["m"] / max(1, g["c"]) > SHOAL_MIN_MEAN) else "fish"
+
+
+def _assign_fill(sel):
+    present = {_eff_shape(g) for g in sel}
+    pool = [g for g in sel if _is_pool(g)]
+    pick = {"whale":  lambda c: max(c, key=lambda g: g["m"]),      # biggest
+            "squid":  lambda c: max(c, key=lambda g: g["cpu"]),    # busiest
+            "jelly":  lambda c: min(c, key=lambda g: g["cpu"]),    # idlest drifter
+            "crab":   lambda c: min(c, key=lambda g: g["m"]),      # smallest
+            "school": lambda c: max(c, key=lambda g: g["c"]),      # most processes
+            "ray":    lambda c: max(c, key=lambda g: g["m"]),      # a solid mid creature from what's left
+            "angler": lambda c: max(c, key=lambda g: g["m"])}
+    taken = set()
+    for shape in FILL_SHAPES:
+        if shape in present:
+            _fill_map.pop(shape, None)                            # produced naturally -> stop filling it
+            continue
+        cand = [g for g in pool if g["n"] not in taken]
+        if not cand:
+            _fill_map.pop(shape, None)
+            continue
+        held = _fill_map.get(shape)
+        chosen = next((g for g in cand if g["n"] == held), None) or pick[shape](cand)   # sticky, else pick
+        chosen["shape"] = shape
+        _fill_map[shape] = chosen["n"]
+        taken.add(chosen["n"])
+
+
 def roster():
     groups = sorted(({"n": n, "m": kb // 1024, "c": c, "cpu": round(cpu, 1), **_top_procs(procs)}
                      for n, (kb, c, cpu, procs) in process_groups().items()),
@@ -465,7 +529,9 @@ def roster():
         if g["n"] not in keep:
             sel.append(g)
     sel.sort(key=lambda g: (g["n"] not in always, -g["m"]))  # keep always-show creatures through the cap
-    return sel[:MAX_GROUPS]
+    final = sel[:MAX_GROUPS]
+    _assign_fill(final)                                      # tag any missing shape onto a stand-in process
+    return final
 
 
 def netdata_ip():

@@ -69,7 +69,8 @@ struct RosterEntry: Decodable {
     let name: String, memMiB: Int, count: Int, cpu: Double
     var sizes: [Int] = []       // real RSS (MiB, desc) per process in the group; empty from an old server
     var cpus: [Double] = []      // cpu% per process, aligned with sizes; empty from an old server
-    enum CodingKeys: String, CodingKey { case name = "n", memMiB = "m", count = "c", cpu, sizes = "s", cpus = "sc" }
+    var shape: String? = nil     // server coverage-fill: force this group to a missing creature shape
+    enum CodingKeys: String, CodingKey { case name = "n", memMiB = "m", count = "c", cpu, sizes = "s", cpus = "sc", shape }
 }
 
 struct State: Decodable {

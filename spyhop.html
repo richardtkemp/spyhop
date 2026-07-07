@@ -208,6 +208,17 @@
   function glow(r, k) { const g = ctx.createRadialGradient(0, 0, 0, 0, 0, r); g.addColorStop(0, col(k, 12, .95)); g.addColorStop(.55, col(k, 0, .5)); g.addColorStop(1, col(k, -8, 0)); return g; }
   const radius = (mib, mul) => Math.min(CFG.radius.max, (CFG.radius.base + Math.sqrt(Math.max(1, mib)) * CFG.radius.memK) * (mul || 1));
   const MAX_SHOAL = 128;   // max fish drawn per school (matches server SCHOOL_MAX); a safety ceiling, not a tight cap
+  // Canonical look per shape, for the server's coverage-fill (a stand-in process adopts a missing shape's
+  // appearance + depth band). Values mirror the DEFAULT_CREATURES rule for each shape.
+  const SHAPE_DEFAULTS = {
+    whale:  { hue: 205, sat: 28, lit: 62, spd: .26, band: [.50, .78] },
+    squid:  { hue: 32,  sat: 88, lit: 62, spd: .70, band: [.30, .60] },
+    jelly:  { hue: 286, sat: 68, lit: 72, spd: .22, band: [.16, .82] },
+    crab:   { hue: 16,  sat: 82, lit: 56, spd: .50, band: [.93, .98] },
+    school: { hue: 172, sat: 70, lit: 63, spd: .95, band: [.28, .52] },
+    ray:    { hue: 250, sat: 44, lit: 62, spd: .50, band: [.55, .82] },
+    angler: { hue: 46,  sat: 85, lit: 62, spd: .42, band: [.60, .84] },
+  };
   // size: per-member visual-radius multiplier. fishSizes() sets it from the server's real per-process
   // RSS (item.s); the random default here is only a fallback for an old server that omits sizes.
   const schoolOffs = n => Array.from({ length: n }, () => ({ dx: (rand() - .5) * 60, dy: (rand() - .5) * 40, vx: 0, vy: 0, pref: .8 + rand() * .5, face: 1, size: .55 + rand() * .9, phase: rand() * TAU, wig: 0, wax: 0, way: 0, wt: 0 }));
@@ -283,7 +294,11 @@
   /* ======================= creatures ======================= */
   const creatures = new Map();
   function makeCreature(item, present) {
-    const k = kindOf(item.n), [a, b] = k.band;
+    const k = kindOf(item.n);
+    const sd = item.shape && !k.re && SHAPE_DEFAULTS[item.shape];
+    if (sd) Object.assign(k, sd, { shape: item.shape });                   // server coverage-fill: adopt a missing shape's look
+    else if (!k.re && item.c > 6 && item.m / item.c > 15) k.shape = 'school';   // auto-shoal: unshaped swarm of substantial procs; explicit shapes (k.re) win
+    const [a, b] = k.band;
     const per = k.shape === 'school' ? item.m / Math.max(1, item.c) : item.m;
     const members = k.shape === 'school' ? clamp(item.c | 0, 2, MAX_SHOAL) : 1;
     const c = {

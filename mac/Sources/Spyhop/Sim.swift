@@ -6,6 +6,21 @@ import Foundation
 
 enum Shape: String { case angler, whale, jelly, squid, ray, fish, school, crab }
 
+// Canonical appearance per shape, for the server's coverage-fill (a stand-in adopts a missing shape's
+// look + depth band). Values mirror spyhop.html SHAPE_DEFAULTS / the DEFAULT_CREATURES rules.
+func shapeFill(_ s: String) -> (shape: Shape, hue: Double, sat: Double, lit: Double, spd: Double, band: (lo: Double, hi: Double))? {
+    switch s {
+    case "whale":  return (.whale, 205, 28, 62, 0.26, (0.50, 0.78))
+    case "squid":  return (.squid, 32,  88, 62, 0.70, (0.30, 0.60))
+    case "jelly":  return (.jelly, 286, 68, 72, 0.22, (0.16, 0.82))
+    case "crab":   return (.crab,  16,  82, 56, 0.50, (0.93, 0.98))
+    case "school": return (.school, 172, 70, 63, 0.95, (0.28, 0.52))
+    case "ray":    return (.ray,   250, 44, 62, 0.50, (0.55, 0.82))
+    case "angler": return (.angler, 46, 85, 62, 0.42, (0.60, 0.84))
+    default:       return nil
+    }
+}
+
 struct Kind {
     var re: NSRegularExpression?
     var shape: Shape
@@ -77,8 +92,14 @@ final class Creature {
         for i in off.indices { off[i].size = radius(Double(sizes[i % sizes.count]), k.mul) / ref }
     }
 
-    init(item: RosterEntry, kind: Kind, present: Bool, now: TimeInterval,
+    init(item: RosterEntry, kind kindIn: Kind, present: Bool, now: TimeInterval,
          radius: (Double, Double?) -> Double, schoolOffs: (Int) -> [SchoolMember]) {
+        var kind = kindIn
+        if let sh = item.shape, kind.re == nil, let d = shapeFill(sh) {   // server coverage-fill: adopt a missing shape's look
+            kind.shape = d.shape; kind.hue = d.hue; kind.sat = d.sat; kind.lit = d.lit; kind.spd = d.spd; kind.band = d.band
+        } else if kind.re == nil && item.count > 6 && Double(item.memMiB) / Double(item.count) > 15 {
+            kind.shape = .school   // auto-shoal: unshaped swarm of substantial procs; explicit shapes (kind.re) win
+        }
         name = item.name; mem = item.memMiB; count = item.count; sizes = item.sizes; cpus = item.cpus; k = kind
         let per = kind.shape == .school ? Double(item.memMiB) / Double(max(1, item.count)) : Double(item.memMiB)
         let members = kind.shape == .school ? min(Const.maxShoal, max(2, item.count)) : 1
