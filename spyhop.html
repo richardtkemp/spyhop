@@ -224,7 +224,10 @@
   // school's own members only (n ≤ 8), never against other creatures — trivial per frame.
   // sep/neigh scale with the member's actual on-screen radius (bigger fish keep more distance)
   // and each member's own `pref` personality, so the spacing isn't a uniform crystal-grid.
-  function updateBoids(off, dt, memberR) {
+  // drift = the whole shoal's horizontal velocity (c.dir*spd*M). A member's on-screen motion is
+  // drift + its shoal-relative vx, so facing must key off that sum — otherwise a fish nudged toward
+  // the back of a forward-drifting shoal faces backward while actually moving forward.
+  function updateBoids(off, dt, memberR, drift) {
     const S = CFG.shoal, n = off.length;
     const sepBase = memberR * S.sepK, neighBase = memberR * S.neighK, range = neighBase * S.rangeK;
     for (let i = 0; i < n; i++) {
@@ -242,7 +245,7 @@
       oi.vx += ax * dt; oi.vy += ay * dt;
       const spd = Math.hypot(oi.vx, oi.vy) || .001, cl = clamp(spd, S.minSpd, S.maxSpd);
       oi.vx = oi.vx / spd * cl; oi.vy = oi.vy / spd * cl;
-      if (Math.abs(oi.vx) > 4) oi.face = oi.vx > 0 ? 1 : -1;   // face actual direction of travel (hysteresis: only flip on a clear signal, so it doesn't flicker near zero)
+      const avx = drift + oi.vx; if (Math.abs(avx) > 4) oi.face = avx > 0 ? 1 : -1;   // face absolute direction of travel (drift + relative); hysteresis so it doesn't flicker near zero
       oi.dx = clamp(oi.dx + oi.vx * dt, -range, range);
       oi.dy = clamp(oi.dy + oi.vy * dt, -range, range);
     }
@@ -740,7 +743,7 @@
       if (c.k.shape === 'jelly') c.swimY = baseY + Math.sin(c.t * CFG.bob.jellySlow + c.bob) * CFG.bob.jellyDrift * M;   // slow, smooth drift — decoupled from the (activity-driven) tentacle pulse
       else if (c.k.shape === 'crab') c.swimY = bedY + 22 - c.rDraw * .7;   // bottom edge at the seafloor trough
       else { const amp = (c.k.shape === 'school' ? CFG.bob.school : CFG.bob.fish) * M * (1 + c.act * CFG.bob.cpuBoost); c.swimY = baseY + Math.sin(c.t * .7 + c.bob) * amp; }
-      if (c.k.shape === 'school') updateBoids(c.off, dt, c.rDraw * CFG.radius.schoolFish);
+      if (c.k.shape === 'school') updateBoids(c.off, dt, c.rDraw * CFG.radius.schoolFish, c.dir * spd * M);
       if (lift > 0) c.swimY += (waterY - c.rDraw * .12 - c.swimY) * lift;   // ease up from the normal bob toward a surface breach and back
       c.avoidY *= CFG.ease.avoidDecay; c.labelOff.x *= CFG.label.decay; c.labelOff.y *= CFG.label.decay;
       c.labelName = c.k.shape === 'school' ? `${c.name} ×${c.count}` : c.name;

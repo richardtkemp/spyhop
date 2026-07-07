@@ -270,7 +270,10 @@ final class Sim {
     /// school's own members only (n ≤ 8), never against other creatures — trivial per frame.
     /// sep/neigh scale with the member's actual on-screen radius (bigger fish keep more distance)
     /// and each member's own `pref` personality, so the spacing isn't a uniform crystal-grid.
-    private func updateBoids(_ off: inout [(dx: Double, dy: Double, vx: Double, vy: Double, pref: Double, face: Double, size: Double)], dt: Double, memberR: Double) {
+    // drift = the whole shoal's horizontal velocity (c.dir*spd*M). A member's on-screen motion is
+    // drift + its shoal-relative vx, so facing must key off that sum — otherwise a fish nudged toward
+    // the back of a forward-drifting shoal faces backward while actually moving forward.
+    private func updateBoids(_ off: inout [(dx: Double, dy: Double, vx: Double, vy: Double, pref: Double, face: Double, size: Double)], dt: Double, memberR: Double, drift: Double) {
         let n = off.count
         let sepBase = memberR * Const.shoalSepK, neighBase = memberR * Const.shoalNeighK, range = neighBase * Const.shoalRangeK
         for i in 0..<n {
@@ -293,7 +296,7 @@ final class Sim {
             let spd = max(0.001, (off[i].vx * off[i].vx + off[i].vy * off[i].vy).squareRoot())
             let cl = clampD(spd, Const.shoalMinSpd, Const.shoalMaxSpd)
             off[i].vx = off[i].vx / spd * cl; off[i].vy = off[i].vy / spd * cl
-            if abs(off[i].vx) > 4 { off[i].face = off[i].vx > 0 ? 1 : -1 }   // face actual direction of travel (hysteresis: only flip on a clear signal, so it doesn't flicker near zero)
+            let avx = drift + off[i].vx; if abs(avx) > 4 { off[i].face = avx > 0 ? 1 : -1 }   // face absolute direction of travel (drift + relative); hysteresis so it doesn't flicker near zero
             off[i].dx = clampD(off[i].dx + off[i].vx * dt, -range, range)
             off[i].dy = clampD(off[i].dy + off[i].vy * dt, -range, range)
         }
@@ -479,7 +482,7 @@ final class Sim {
                 let amp = (c.k.shape == .school ? Const.bobSchool : Const.bobFish) * M * (1 + c.act * Const.bobCpuBoost)
                 c.swimY = baseY + sin(c.t * 0.7 + c.bob) * amp
             }
-            if c.k.shape == .school { updateBoids(&c.off, dt: dt, memberR: c.rDraw * Const.schoolFish) }
+            if c.k.shape == .school { updateBoids(&c.off, dt: dt, memberR: c.rDraw * Const.schoolFish, drift: c.dir * spd * M) }
             if lift > 0 { c.swimY += (waterY - c.rDraw * 0.12 - c.swimY) * lift }   // ease up from the normal bob toward a surface breach and back
             c.avoidY *= Const.avoidDecay
             c.labelOffX *= Const.labelDecay
