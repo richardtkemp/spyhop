@@ -53,7 +53,7 @@
     bob: { fish: 16, school: 14, cpuBoost: 0.7, jellyDrift: 12, jellyRate: 0.35, jellySlow: 0.22 },   // jellyRate: bell/tentacle pulse rate; jellySlow: the (much slower, decoupled) vertical drift
     whale: { flipperK: 70 },                                    // flipper phase rate = flipperK * (1 + act) / rDraw — big whales flap lazily (~4s/beat near max size), small ones twitch faster
     radius: { base: 6, memK: 0.85, max: 58, schoolFish: 0.9 },
-    shoal: { sepK: 0.9, neighK: 2.1, sepForce: 650, align: 0.55, cohesion: 0.35, home: 0.1, edgeForce: 800, maxSpd: 46, minSpd: 8, wander: 18, rangeK: 2.6 },   // boids: sep spacing scales with each PAIR's real drawn size; rangeK = round soft-boundary radius, edgeForce eases fish back inside it (no square hard-clamp -> no lining up on a wall)
+    shoal: { sepK: 0.7, neighK: 2.1, sepForce: 650, align: 0.55, cohesion: 0.5, home: 0.15, maxSpd: 46, minSpd: 8, wander: 6 },   // boids: sep spacing scales with each PAIR's real drawn size; the shoal is held together by cohesion and centred by the home spring (no box) — like textbook Reynolds boids
     avoid: { gap: 0.72, push: 90, yBias: 1.0, slide: 1.8 },    // slide: strong tangential unstick so head-on pairs pass
     crab: { near: 1.7, boost: 2.8, decay: 0.9, crawl: 1, dirLock: 0.6 },   // near crabs: the larger scoots away; dirLock: min s before it may flip again
     label: { push: 0.45, crabPush: 1.0, charW: 6.4, decay: 0.82 },
@@ -229,7 +229,7 @@
   // the back of a forward-drifting shoal faces backward while actually moving forward.
   function updateBoids(off, dt, memberR, drift) {
     const S = CFG.shoal, n = off.length;
-    const neighBase = memberR * S.neighK, range = neighBase * S.rangeK;
+    const neighBase = memberR * S.neighK;
     for (let i = 0; i < n; i++) {
       const oi = off[i], ri = memberR * oi.size, neigh = neighBase * oi.pref;
       let sepX = 0, sepY = 0, alX = 0, alY = 0, cohX = 0, cohY = 0, near = 0;
@@ -243,8 +243,6 @@
       let ax = sepX * S.sepForce - oi.dx * S.home + (rand() - .5) * S.wander;
       let ay = sepY * S.sepForce - oi.dy * S.home + (rand() - .5) * S.wander;
       if (near) { ax += (alX / near - oi.vx) * S.align + (cohX / near - oi.dx) * S.cohesion; ay += (alY / near - oi.vy) * S.align + (cohY / near - oi.dy) * S.cohesion; }
-      const dist = Math.hypot(oi.dx, oi.dy) || .001;                                            // round soft boundary: ease fish back inside the shoal radius instead of clamping to a square wall
-      if (dist > range) { const over = (dist - range) / range; ax -= oi.dx / dist * over * S.edgeForce; ay -= oi.dy / dist * over * S.edgeForce; }
       oi.vx += ax * dt; oi.vy += ay * dt;
       const spd = Math.hypot(oi.vx, oi.vy) || .001, cl = clamp(spd, S.minSpd, S.maxSpd);
       oi.vx = oi.vx / spd * cl; oi.vy = oi.vy / spd * cl;

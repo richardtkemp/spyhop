@@ -129,9 +129,9 @@ enum Const {
     // radius
     static let radBase = 6.0, memK = 0.85, radMax = 58.0, schoolFish = 0.9
     // shoal (boids tuning for school members) — sepK/neighK scale with each member's actual drawn size
-    static let shoalSepK = 0.9, shoalNeighK = 2.1, shoalSepForce = 650.0   // sep spacing scales with each PAIR's real drawn size (small fish stay close)
-    static let shoalAlign = 0.55, shoalCohesion = 0.35, shoalHome = 0.1, shoalMaxSpd = 46.0, shoalMinSpd = 8.0
-    static let shoalWander = 18.0, shoalRangeK = 2.6, shoalEdgeForce = 800.0   // rangeK = round soft-boundary radius; edgeForce eases fish back inside it (no square hard wall)
+    static let shoalSepK = 0.7, shoalNeighK = 2.1, shoalSepForce = 650.0   // sep spacing scales with each PAIR's real drawn size (small fish stay close)
+    static let shoalAlign = 0.55, shoalCohesion = 0.5, shoalHome = 0.15, shoalMaxSpd = 46.0, shoalMinSpd = 8.0
+    static let shoalWander = 6.0   // held together by cohesion, centred by the home spring (no box) — like textbook Reynolds boids
     // avoid — gentle VERTICAL-only personal space (swimmers drift apart in depth to pass, never
     // shoved horizontally). Wide range (gap), cubic ramp so force builds slowly from ~0 at the
     // edge, and a low ceiling (avoidPush small). Diverges from the web's bidirectional push+slide.
@@ -288,7 +288,7 @@ final class Sim {
     // the back of a forward-drifting shoal faces backward while actually moving forward.
     private func updateBoids(_ off: inout [SchoolMember], dt: Double, memberR: Double, drift: Double) {
         let n = off.count
-        let neighBase = memberR * Const.shoalNeighK, range = neighBase * Const.shoalRangeK
+        let neighBase = memberR * Const.shoalNeighK
         for i in 0..<n {
             let ri = memberR * off[i].size, neigh = neighBase * off[i].pref
             var sepX = 0.0, sepY = 0.0, alX = 0.0, alY = 0.0, cohX = 0.0, cohY = 0.0, near = 0
@@ -306,8 +306,6 @@ final class Sim {
                 ax += (alX / nf - off[i].vx) * Const.shoalAlign + (cohX / nf - off[i].dx) * Const.shoalCohesion
                 ay += (alY / nf - off[i].vy) * Const.shoalAlign + (cohY / nf - off[i].dy) * Const.shoalCohesion
             }
-            let dist = max(0.001, (off[i].dx * off[i].dx + off[i].dy * off[i].dy).squareRoot())   // round soft boundary: ease fish back inside the shoal radius instead of clamping to a square wall
-            if dist > range { let over = (dist - range) / range; ax -= off[i].dx / dist * over * Const.shoalEdgeForce; ay -= off[i].dy / dist * over * Const.shoalEdgeForce }
             off[i].vx += ax * dt; off[i].vy += ay * dt
             let spd = max(0.001, (off[i].vx * off[i].vx + off[i].vy * off[i].vy).squareRoot())
             let cl = clampD(spd, Const.shoalMinSpd, Const.shoalMaxSpd)
