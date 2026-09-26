@@ -267,8 +267,33 @@ def _pid_service(pid):
     return _cont_map.get(m.group(0)) if m else None
 
 
+# Longest process-group name we emit. Names are drawn as labels; the native client renders each label
+# into one GPU texture, and a multi-KB argv once produced a label wider than Metal's texture limit and
+# crashed it. Real names are short — this only ever bites garbage.
+NAME_MAX = 40
+SHELL_KEYWORDS = {"while", "until", "for", "if", "case", "select", "function", "{", "!", "[", "[["}
+
+
+def _shell_cmd_name(cmd):
+    """Program an `sh -c "<cmd>"` runs: the first command word, quotes stripped, `exec` and
+    VAR=value prefixes skipped. None when the string opens with shell syntax (a loop, an if)."""
+    for w in cmd.split():
+        w = w.strip("\"'")
+        if not w or w == "exec" or re.match(r"[A-Za-z_]\w*=", w):
+            continue
+        if w in SHELL_KEYWORDS or w.startswith("("):
+            return None
+        return SCRIPT_EXT.sub("", os.path.basename(w)) or None
+    return None
+
+
 def display_name(comm, pid):
-    """Best human name for a process; None for kernel threads we don't surface."""
+    """Best human name for a process (at most NAME_MAX chars); None for kernel threads we skip."""
+    n = _display_name(comm, pid)
+    return n if n is None or len(n) <= NAME_MAX else n[:NAME_MAX - 1] + "…"
+
+
+def _display_name(comm, pid):
     svc = _pid_service(pid)
     if svc:
         return svc                                    # containerised -> clean compose service name
@@ -295,6 +320,10 @@ def display_name(comm, pid):
     if not (low.startswith(GENERIC_PREFIX) or low in GENERIC_EXACT):
         return name0
     toks = args[1:]
+    if low in ("sh", "bash") and "-c" in toks:        # the whole command line is ONE argv token —
+        i = toks.index("-c")                          # name the program it runs, not the string
+        if i + 1 < len(toks):
+            return _shell_cmd_name(toks[i + 1]) or name0
     if low.startswith("python") and "-m" in toks:
         i = toks.index("-m")
         if i + 1 < len(toks):

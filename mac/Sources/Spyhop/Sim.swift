@@ -167,6 +167,7 @@ enum Const {
     static let crabNear = 1.7, crabBoost = 2.8, crabDecay = 0.9, crabCrawl = 1.0, crabDirLock = 0.6
     // label
     static let labelPush = 0.45, labelCrabPush = 1.0, charW = 6.4, labelDecay = 0.82
+    static let labelMax = 40   // chars; matches the server's NAME_MAX
     static let tempWindowMs = 15000.0
     static let waterLevelF = 0.30, bedFrac = 0.90, wxMax = 1.6
     // spyhop: one whale periodically rises to breach the surface (honours the app's name)
@@ -565,7 +566,10 @@ final class Sim {
             c.avoidY *= Const.avoidDecay
             c.labelOffX *= Const.labelDecay
             c.labelOffY *= Const.labelDecay
-            c.labelName = c.k.shape == .school ? "\(c.name) ×\(c.count)" : c.name
+            // Cap the label: SKLabelNode renders it into one texture, and a name wider than Metal's
+            // texture limit (a server bug once sent a 13 KB argv) aborts the whole app.
+            let shown = c.name.count > Const.labelMax ? String(c.name.prefix(Const.labelMax - 1)) + "…" : c.name
+            c.labelName = c.k.shape == .school ? "\(shown) ×\(c.count)" : shown
             c.labelHW = Double(c.labelName.count) * Const.charW / 2
             if c.k.shape == .school {   // label follows the members' centroid, above the topmost fish (wrapped like the fish)
                 var lx = (c.x + c.cx).truncatingRemainder(dividingBy: W); if lx < 0 { lx += W }
